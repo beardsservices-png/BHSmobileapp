@@ -10,6 +10,7 @@ import Expenses from './pages/Expenses'
 import Trips from './pages/Trips'
 import Reports from './pages/Reports'
 import DayWrapup from './pages/DayWrapup'
+import Clock from './pages/Clock'
 
 function App() {
   return (
@@ -37,6 +38,10 @@ function App() {
                 <NavLink to="/customers" className={({ isActive }) =>
                   `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-blue-100 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}>
                   Customers
+                </NavLink>
+                <NavLink to="/clock" className={({ isActive }) =>
+                  `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-green-100 text-green-700' : 'bg-green-500 text-white hover:bg-green-600'}`}>
+                  Clock In/Out
                 </NavLink>
                 <NavLink to="/time" className={({ isActive }) =>
                   `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-green-100 text-green-700' : 'text-slate-600 hover:bg-slate-100'}`}>
@@ -72,6 +77,7 @@ function App() {
             <Route path="/filing-cabinet" element={<FilingCabinet />} />
             <Route path="/jobs" element={<Jobs />} />
             <Route path="/customers" element={<Customers />} />
+            <Route path="/clock" element={<Clock />} />
             <Route path="/time" element={<TimeEntry />} />
             <Route path="/estimate" element={<Estimate />} />
             <Route path="/print/:jobId" element={<PrintView />} />

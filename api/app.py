@@ -12,6 +12,8 @@ import urllib.request
 import urllib.parse
 import json
 from datetime import datetime
+import math
+import time as _time
 
 BRIAN_HOME_LAT = 36.3345   # Mountain Home, AR
 BRIAN_HOME_LON = -92.3857
@@ -71,6 +73,16 @@ def migrate_db():
     # trip_skip on time_entries (1 = user dismissed the suggested-trip prompt)
     try:
         conn.execute("ALTER TABLE time_entries ADD COLUMN trip_skip INTEGER DEFAULT 0")
+    except:
+        pass
+
+    # customer_lat / customer_lon — cached geocoords for clock-in GPS matching
+    try:
+        conn.execute("ALTER TABLE customers ADD COLUMN customer_lat REAL")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE customers ADD COLUMN customer_lon REAL")
     except:
         pass
 
@@ -2600,6 +2612,74 @@ def day_wrapup():
         conn.rollback()
         conn.close()
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# CLOCK IN / NEAREST CUSTOMER
+# ============================================================
+
+def _haversine_miles(lat1, lon1, lat2, lon2):
+    R = 3959.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return R * 2 * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+
+
+@app.route('/api/nearest-customer')
+def nearest_customer():
+    try:
+        user_lat = float(request.args.get('lat', 0))
+        user_lon = float(request.args.get('lng', 0))
+    except ValueError:
+        return jsonify({'error': 'Invalid lat/lng'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT id, name, address, customer_lat, customer_lon
+        FROM customers
+        WHERE address IS NOT NULL AND address != '' AND NOT name LIKE '\_%' ESCAPE '\'
+    ''')
+    customers = rows_to_list(cursor.fetchall())
+
+    # Geocode up to 4 uncached customers per request (keeps response under ~5s)
+    geocoded_count = 0
+    for c in customers:
+        if c['customer_lat'] is None and geocoded_count < 4:
+            try:
+                encoded = urllib.parse.quote(c['address'] + ', USA')
+                url = f'https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1'
+                req = urllib.request.Request(url, headers={'User-Agent': 'BeardHomeServices/1.0'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    geo = json.loads(resp.read())
+                if geo:
+                    c['customer_lat'] = float(geo[0]['lat'])
+                    c['customer_lon'] = float(geo[0]['lon'])
+                    cursor.execute('UPDATE customers SET customer_lat=?, customer_lon=? WHERE id=?',
+                                   (c['customer_lat'], c['customer_lon'], c['id']))
+                    geocoded_count += 1
+                    if geocoded_count < 4:
+                        _time.sleep(1.1)  # Nominatim rate limit
+            except Exception:
+                pass
+
+    conn.commit()
+    conn.close()
+
+    results = []
+    for c in customers:
+        if c['customer_lat'] is not None:
+            dist = _haversine_miles(user_lat, user_lon, c['customer_lat'], c['customer_lon'])
+            results.append({
+                'id': c['id'],
+                'name': c['name'],
+                'address': c['address'],
+                'distance_miles': round(dist, 1)
+            })
+
+    results.sort(key=lambda x: x['distance_miles'])
+    return jsonify(results[:5])
 
 
 # ============================================================
