@@ -12,29 +12,42 @@ import Trips from './pages/Trips'
 import Reports from './pages/Reports'
 import DayWrapup from './pages/DayWrapup'
 import Clock from './pages/Clock'
+import Settings from './pages/Settings'
 
 const LS_CLOCK = 'bhs_clock_v1'
 
-const MORE_ITEMS = [
-  { to: '/filing-cabinet', label: 'Filing Cabinet' },
-  { to: '/jobs',           label: 'Jobs' },
-  { to: '/time',           label: '+ Time Entry' },
-  { to: '/expenses',       label: 'Expenses' },
-  { to: '/trips',          label: 'Trips' },
-  { to: '/reports',        label: 'Reports' },
-  { to: '/day-wrapup',     label: 'Day Wrap-Up' },
+const ALL_MORE_ITEMS = [
+  { key: 'filing-cabinet', to: '/filing-cabinet', label: 'Filing Cabinet' },
+  { key: 'jobs',           to: '/jobs',           label: 'Jobs' },
+  { key: 'time',           to: '/time',           label: '+ Time Entry' },
+  { key: 'expenses',       to: '/expenses',       label: 'Expenses' },
+  { key: 'trips',          to: '/trips',          label: 'Trips' },
+  { key: 'reports',        to: '/reports',        label: 'Reports' },
+  { key: 'day-wrapup',     to: '/day-wrapup',     label: 'Day Wrap-Up' },
 ]
+
+function getHidden() {
+  try { return JSON.parse(localStorage.getItem('bhs_settings') || '{}').hidden || [] }
+  catch { return [] }
+}
 
 function BottomNav() {
   const location = useLocation()
   const [showMore, setShowMore] = useState(false)
   const [clockActive, setClockActive] = useState(false)
+  const [hidden, setHidden] = useState(getHidden)
 
   useEffect(() => {
     const check = () => setClockActive(!!localStorage.getItem(LS_CLOCK))
     check()
     const iv = setInterval(check, 3000)
     return () => clearInterval(iv)
+  }, [])
+
+  useEffect(() => {
+    const handler = () => setHidden(getHidden())
+    window.addEventListener('bhs-settings-changed', handler)
+    return () => window.removeEventListener('bhs-settings-changed', handler)
   }, [])
 
   useEffect(() => setShowMore(false), [location.pathname])
@@ -52,7 +65,7 @@ function BottomNav() {
             className="absolute bottom-16 left-0 right-0 bg-white border-t border-slate-200 px-4 pt-4 pb-3 grid grid-cols-3 gap-2"
             onClick={e => e.stopPropagation()}
           >
-            {MORE_ITEMS.map(item => (
+            {ALL_MORE_ITEMS.filter(item => !hidden.includes(item.key)).map(item => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -63,6 +76,14 @@ function BottomNav() {
                 {item.label}
               </NavLink>
             ))}
+            <NavLink
+              to="/settings"
+              className={({ isActive }) =>
+                `text-center py-3 px-2 rounded-xl text-sm font-medium transition-colors ${isActive ? 'bg-blue-100 text-blue-700' : 'bg-slate-50 text-slate-700 hover:bg-slate-100'}`
+              }
+            >
+              Settings
+            </NavLink>
           </div>
         </div>
       )}
@@ -194,6 +215,7 @@ function App() {
             <Route path="/trips" element={<Trips />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/day-wrapup" element={<DayWrapup />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
         <BottomNav />
