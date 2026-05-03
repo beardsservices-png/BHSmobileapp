@@ -892,8 +892,8 @@ def filing_cabinet_new():
         job_id = cursor.lastrowid
 
         services = data.get('services', [])
-        total_labor = sum(s['amount'] for s in services if s.get('service_type') == 'labor')
-        total_materials = sum(s['amount'] for s in services if s.get('service_type') == 'materials')
+        total_labor = sum(s['amount'] * s.get('quantity', 1) for s in services if s.get('service_type') == 'labor')
+        total_materials = sum(s['amount'] * s.get('quantity', 1) for s in services if s.get('service_type') == 'materials')
 
         invoice_status = 'paid' if status == 'completed' else status
         cursor.execute('''

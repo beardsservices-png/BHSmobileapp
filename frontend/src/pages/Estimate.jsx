@@ -228,8 +228,9 @@ export default function Estimate() {
     return m
   }, {})
 
-  const totalLabor     = form.services.filter(s => s.service_type === 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0)
-  const totalMaterials = form.services.filter(s => s.service_type !== 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0)
+  const lineTotal = i => (parseFloat(i.amount) || 0) * (parseFloat(i.quantity) || 1)
+  const totalLabor     = form.services.filter(s => s.service_type === 'labor').reduce((s, i) => s + lineTotal(i), 0)
+  const totalMaterials = form.services.filter(s => s.service_type !== 'labor').reduce((s, i) => s + lineTotal(i), 0)
   const daySuggestion  = suggestDays()
 
   return (
