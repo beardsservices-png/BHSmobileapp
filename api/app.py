@@ -31,6 +31,7 @@ FRONTEND_DIST = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist'
 
 def migrate_db():
     """Run schema migrations at startup — safe to run multiple times."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
