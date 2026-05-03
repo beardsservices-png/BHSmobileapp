@@ -92,6 +92,37 @@ export default function Estimate() {
     setForm(f => ({ ...f, services: f.services.filter((_, i) => i !== idx) }))
   }
 
+  async function pickFromContacts() {
+    if (!navigator.contacts?.select) {
+      alert('Contacts picker is not supported on this browser. Type the details manually.')
+      return
+    }
+    try {
+      const supported = await navigator.contacts.getProperties()
+      const props = ['name', 'tel', 'address', 'email'].filter(p => supported.includes(p))
+      const results = await navigator.contacts.select(props, { multiple: false })
+      if (!results?.length) return
+      const c = results[0]
+      const name = c.name?.[0] || ''
+      const phone = c.tel?.[0] || ''
+      const email = c.email?.[0] || ''
+      let address = ''
+      if (c.address?.[0]) {
+        const a = c.address[0]
+        address = [a.streetAddress, a.city, a.state, a.postalCode].filter(Boolean).join(', ')
+      }
+      setNewCust(n => ({
+        ...n,
+        name: name || n.name,
+        phone: phone ? formatPhone(phone) : n.phone,
+        address: address || n.address,
+        email: email || n.email,
+      }))
+    } catch (err) {
+      if (err.name !== 'AbortError') alert('Could not open contacts: ' + err.message)
+    }
+  }
+
   // Create a new customer on the fly
   async function handleCreateCustomer() {
     if (!newCust.name.trim()) { alert('Customer name is required.'); return }
@@ -266,7 +297,18 @@ export default function Estimate() {
           {/* New Customer inline form */}
           {showNewCust && (
             <div className="col-span-2 bg-blue-50 border border-blue-200 rounded-xl p-4">
-              <p className="text-xs font-semibold text-blue-700 mb-3">New Customer — fill in their info</p>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-semibold text-blue-700">New Customer — fill in their info</p>
+                <button
+                  onClick={pickFromContacts}
+                  className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 border border-blue-300 hover:bg-blue-100 px-2.5 py-1.5 rounded-lg transition-colors bg-white"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                  </svg>
+                  Pick from Contacts
+                </button>
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="col-span-2">
                   <label className="block text-xs text-gray-500 mb-1">Name *</label>
