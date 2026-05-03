@@ -14,7 +14,7 @@ function fmtHours(ms) {
 }
 
 export default function Clock() {
-  // phase: idle | locating | confirming | running | wrapping
+  // phase: idle | locating | confirming | running | wrapping | trip
   const [phase, setPhase] = useState('idle')
   const [candidates, setCandidates] = useState([])
   const [allCustomers, setAllCustomers] = useState([])
@@ -25,6 +25,9 @@ export default function Clock() {
   const [description, setDescription] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [tripMiles, setTripMiles] = useState('')
+  const [tripSaving, setTripSaving] = useState(false)
+  const [savedDate, setSavedDate] = useState('')
   const timerRef = useRef(null)
 
   // Restore active session from localStorage
@@ -131,17 +134,54 @@ export default function Clock() {
         }),
       })
       if (!res.ok) throw new Error('Server error')
+      const entryDate = new Date(startTs).toISOString().slice(0, 10)
       localStorage.removeItem(LS_KEY)
-      setPhase('idle')
-      setSelected(null)
-      setStartTs(null)
-      setElapsed(0)
       setDescription('')
+      setSavedDate(entryDate)
+      // Fetch customer mileage for trip suggestion
+      try {
+        const cr = await fetch(`/api/customers/${selected.id}`)
+        const cd = await cr.json()
+        const oneway = cd.mileage_from_home || 0
+        setTripMiles(oneway > 0 ? String(Math.round(oneway * 2 * 10) / 10) : '')
+      } catch {
+        setTripMiles('')
+      }
+      setPhase('trip')
     } catch {
       setError('Failed to save. Try again.')
     } finally {
       setSaving(false)
     }
+  }
+
+  async function logTrip() {
+    if (!tripMiles || parseFloat(tripMiles) <= 0) { finishSession(); return }
+    setTripSaving(true)
+    try {
+      await fetch('/api/trips', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          trip_date: savedDate,
+          trip_type: 'job_site',
+          destination: selected?.address || selected?.name,
+          customer_id: selected?.id,
+          miles: parseFloat(tripMiles),
+        }),
+      })
+    } catch {}
+    finishSession()
+  }
+
+  function finishSession() {
+    setPhase('idle')
+    setSelected(null)
+    setStartTs(null)
+    setElapsed(0)
+    setTripMiles('')
+    setTripSaving(false)
+    setSavedDate('')
   }
 
   function handleDiscard() {
@@ -285,6 +325,43 @@ export default function Clock() {
             className="mt-5 text-sm text-slate-400 hover:text-red-500"
           >
             Discard session
+          </button>
+        </div>
+      )}
+
+      {/* ── TRIP PROMPT ── */}
+      {phase === 'trip' && (
+        <div className="pt-8 pb-8 space-y-6">
+          <div className="text-center">
+            <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center mx-auto mb-4">
+              <svg className="w-8 h-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-slate-800">Log your drive?</h2>
+            <p className="text-sm text-slate-500 mt-1">to {selected?.name}</p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Round-trip miles</label>
+            <input
+              type="number"
+              inputMode="decimal"
+              value={tripMiles}
+              onChange={e => setTripMiles(e.target.value)}
+              placeholder="e.g. 12.4"
+              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {tripMiles && <p className="text-xs text-slate-400 mt-1 text-center">Based on saved customer distance</p>}
+          </div>
+          <button
+            onClick={logTrip}
+            disabled={tripSaving}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl disabled:opacity-50 active:scale-95 transition-all"
+          >
+            {tripSaving ? 'Saving...' : 'Log Drive'}
+          </button>
+          <button onClick={finishSession} className="w-full text-center py-2 text-sm text-slate-400 hover:text-slate-600">
+            Skip — no drive to log
           </button>
         </div>
       )}

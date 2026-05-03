@@ -1,5 +1,51 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
+
+const LS_CLOCK = 'bhs_clock_v1'
+
+function fmtElapsed(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+}
+
+function ClockBanner() {
+  const navigate = useNavigate()
+  const [session, setSession] = useState(null)
+  const [elapsed, setElapsed] = useState(0)
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_CLOCK)
+      if (raw) setSession(JSON.parse(raw))
+    } catch {}
+  }, [])
+
+  useEffect(() => {
+    if (!session) return
+    const iv = setInterval(() => setElapsed(Math.floor((Date.now() - session.startTs) / 1000)), 1000)
+    return () => clearInterval(iv)
+  }, [session])
+
+  if (!session) return null
+
+  return (
+    <button
+      onClick={() => navigate('/clock')}
+      className="w-full flex items-center gap-3 bg-green-500 hover:bg-green-600 text-white px-4 py-3 rounded-xl transition-colors"
+    >
+      <span className="w-2.5 h-2.5 bg-white rounded-full animate-pulse shrink-0" />
+      <div className="flex-1 text-left min-w-0">
+        <span className="font-semibold">Clocked in</span>
+        <span className="mx-2 opacity-70">—</span>
+        <span className="truncate">{session.customer?.name}</span>
+      </div>
+      <span className="font-mono font-bold tabular-nums shrink-0">{fmtElapsed(elapsed)}</span>
+      <svg className="w-4 h-4 opacity-70 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+      </svg>
+    </button>
+  )
+}
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 const fmt  = n => `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
@@ -102,6 +148,8 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+
+      <ClockBanner />
 
       {/* Header */}
       <div className="flex items-center justify-between">
