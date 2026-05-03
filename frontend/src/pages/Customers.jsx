@@ -41,6 +41,37 @@ export default function Customers() {
 
   const fmt = (n) => `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
 
+  async function pickFromContacts() {
+    if (!navigator.contacts?.select) {
+      alert('Contacts picker is not supported on this browser. Type the details manually.')
+      return
+    }
+    try {
+      const supported = await navigator.contacts.getProperties()
+      const props = ['name', 'tel', 'address', 'email'].filter(p => supported.includes(p))
+      const results = await navigator.contacts.select(props, { multiple: false })
+      if (!results?.length) return
+      const c = results[0]
+      const name = c.name?.[0] || ''
+      const phone = c.tel?.[0] || ''
+      const email = c.email?.[0] || ''
+      let address = ''
+      if (c.address?.[0]) {
+        const a = c.address[0]
+        address = [a.streetAddress, a.city, a.state, a.postalCode].filter(Boolean).join(', ')
+      }
+      setForm(f => ({
+        ...f,
+        name: name || f.name,
+        phone: phone ? formatPhone(phone) : f.phone,
+        address: address || f.address,
+        email: email || f.email,
+      }))
+    } catch (err) {
+      if (err.name !== 'AbortError') alert('Could not open contacts: ' + err.message)
+    }
+  }
+
   async function handleSave() {
     if (!form.name.trim()) return
     setSaving(true)
@@ -138,7 +169,18 @@ export default function Customers() {
       <div className="flex-1 overflow-y-auto bg-gray-50 p-6">
         {showForm && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">New Customer</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">New Customer</h2>
+              <button
+                onClick={pickFromContacts}
+                className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-800 border border-blue-200 hover:bg-blue-50 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                </svg>
+                Pick from Contacts
+              </button>
+            </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-700 mb-1">Name *</label>
