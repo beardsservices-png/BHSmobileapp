@@ -23,4 +23,4 @@ RUN npm --prefix frontend run build
 COPY api/ api/
 COPY wsgi.py .
 
-CMD gunicorn --bind 0.0.0.0:$PORT -w 2 --timeout 120 wsgi:app
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:$PORT -w 2 --timeout 120 wsgi:app"]
