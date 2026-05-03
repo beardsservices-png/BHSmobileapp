@@ -54,8 +54,8 @@ CATEGORY_RULES = [
     (['asphalt', 'driveway repair'],
      'Asphalt & Paving Labor'),
 
-    (['painting', 'staining', 'interior paint', 'exterior paint', 'siding repair',
-      'paint prep', 'organizing, cleaning, floor, paint prep'],
+    (['painting', 'staining', 'paint ', 'paint\t', 'interior paint', 'exterior paint',
+      'siding repair', 'paint prep', 'organizing, cleaning, floor, paint prep'],
      'Painting/Staining Labor'),
 
     (['flooring installation', 'flooring, vinyl', 'laminate flooring',

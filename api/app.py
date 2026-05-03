@@ -3,7 +3,7 @@ Beard's Home Services API
 Flask backend serving data from SQLite database.
 """
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 import sqlite3
 import os
@@ -19,8 +19,14 @@ BRIAN_HOME_LON = -92.3857
 app = Flask(__name__)
 CORS(app)
 
-# Database path
-DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'beard_business.db')
+# Database path — Railway sets DB_PATH env var pointing to a volume
+DB_PATH = os.environ.get(
+    'DB_PATH',
+    os.path.join(os.path.dirname(__file__), '..', 'data', 'beard_business.db')
+)
+
+# React build output (served in production)
+FRONTEND_DIST = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist')
 
 
 def migrate_db():
@@ -2612,7 +2618,146 @@ def health():
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 
+# ============================================================
+# IMPORT JOB — called by process_completed_job.py when RAILWAY_URL is set
+# ============================================================
+
+@app.route('/api/import-job', methods=['POST'])
+def import_job():
+    key = request.headers.get('X-Admin-Key', '')
+    if key != os.environ.get('ADMIN_KEY', ''):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    data = request.json
+    if not data or not data.get('invoice_number'):
+        return jsonify({'error': 'invoice_number is required'}), 400
+
+    inv_num = str(data['invoice_number'])
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT id FROM invoices WHERE invoice_number = ?', (inv_num,))
+    if cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'already exists', 'invoice_number': inv_num}), 409
+
+    customer_name = data.get('customer_name') or 'Unknown'
+    address = data.get('address')
+    phone = data.get('phone')
+
+    cursor.execute('SELECT id, address, phone FROM customers WHERE name = ?', (customer_name,))
+    row = cursor.fetchone()
+    if row:
+        cust_id = row['id']
+        if address and not row['address']:
+            cursor.execute('UPDATE customers SET address = ? WHERE id = ?', (address, cust_id))
+        if phone and not row['phone']:
+            cursor.execute('UPDATE customers SET phone = ? WHERE id = ?', (phone, cust_id))
+    else:
+        cursor.execute('INSERT INTO customers (name, address, phone) VALUES (?, ?, ?)',
+                       (customer_name, address, phone))
+        cust_id = cursor.lastrowid
+
+    services = data.get('services', [])
+    time_entries = data.get('time_entries', [])
+    total_labor = sum(s['amount'] for s in services if s.get('type') == 'labor')
+    total_materials = sum(s['amount'] for s in services if s.get('type') == 'materials')
+    total_amount = data.get('total') or (total_labor + total_materials)
+
+    cursor.execute('''
+        INSERT INTO jobs (customer_id, invoice_id, project_number, start_date, status)
+        VALUES (?, ?, ?, ?, 'completed')
+    ''', (cust_id, inv_num, inv_num, data.get('invoice_date')))
+    job_id = cursor.lastrowid
+
+    cursor.execute('''
+        INSERT INTO invoices
+        (invoice_number, customer_id, job_id, total_labor, total_materials,
+         total_amount, invoice_date, status, pdf_filename)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)
+    ''', (inv_num, cust_id, job_id, total_labor, total_materials,
+          total_amount, data.get('invoice_date'), data.get('pdf_filename')))
+    invoice_id = cursor.lastrowid
+
+    for svc in services:
+        cursor.execute('''
+            INSERT INTO services_performed
+            (invoice_id, job_id, original_description, standardized_description,
+             category, amount, service_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (invoice_id, job_id,
+              svc.get('original', ''), svc.get('standardized', ''),
+              svc.get('category', ''), svc.get('amount', 0), svc.get('type', 'labor')))
+
+    svc_desc = ', '.join(s.get('standardized', '') for s in services)
+    for te in time_entries:
+        cursor.execute('''
+            INSERT INTO time_entries
+            (customer_id, job_id, entry_date, start_time, end_time, hours,
+             description, source, cost_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 'Billable')
+        ''', (cust_id, job_id, te.get('date'), te.get('start_time'),
+              te.get('end_time'), te.get('hours', 0), svc_desc))
+
+        cursor.execute('''
+            INSERT INTO timeline_visits
+            (customer_id, job_id, visit_date, arrival_time, departure_time,
+             duration_hours, address, source, matched)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 1)
+        ''', (cust_id, job_id, te.get('date'), te.get('arrival_time'),
+              te.get('departure_time'), te.get('hours', 0), address or ''))
+
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'ok': True,
+        'job_id': job_id,
+        'invoice_number': inv_num,
+        'customer': customer_name,
+        'total': total_amount,
+        'services': len(services),
+        'time_entries': len(time_entries),
+    }), 201
+
+
+# ============================================================
+# ADMIN — database restore (one-time upload from local PC)
+# ============================================================
+
+@app.route('/api/admin/restore-db', methods=['POST'])
+def restore_db():
+    key = request.headers.get('X-Admin-Key', '')
+    if key != os.environ.get('ADMIN_KEY', ''):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    if 'db' not in request.files:
+        return jsonify({'error': 'no db file in request'}), 400
+
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    request.files['db'].save(DB_PATH)
+    conn = get_db()
+    count = conn.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
+    conn.close()
+    return jsonify({'ok': True, 'customers': count, 'message': 'Database restored'})
+
+
+# ============================================================
+# REACT FRONTEND — serve built files (production / Railway)
+# ============================================================
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_react(path):
+    if path and os.path.exists(os.path.join(FRONTEND_DIST, path)):
+        return send_from_directory(FRONTEND_DIST, path)
+    return send_from_directory(FRONTEND_DIST, 'index.html')
+
+
 if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
     print("Starting Beard's Home Services API...")
-    print(f"Database: {DB_PATH}")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    print("Database: " + DB_PATH)
+    app.run(debug=True, host='0.0.0.0', port=port)
