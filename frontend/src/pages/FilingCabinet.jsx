@@ -930,6 +930,7 @@ export default function FilingCabinet() {
 
           </div>
         )}
+        </div>
       </div>
     </div>
   )
@@ -1708,7 +1709,6 @@ function DataGapsPanel({
             </>
           )
         )}
-        </div>
       </div>
     </div>
   )

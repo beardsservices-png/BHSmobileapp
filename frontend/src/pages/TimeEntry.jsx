@@ -12,12 +12,14 @@ function calcHours(arrive, depart) {
 export default function TimeEntry() {
   const [entries, setEntries] = useState([])
   const [customers, setCustomers] = useState([])
+  const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [filterCustomer, setFilterCustomer] = useState('')
   const [form, setForm] = useState({
     customer_id: '',
+    job_id: '',
     entry_date: new Date().toISOString().slice(0, 10),
     arrive_time: '',
     depart_time: '',
@@ -30,12 +32,20 @@ export default function TimeEntry() {
     Promise.all([
       fetch('/api/time-entries').then(r => r.json()),
       fetch('/api/customers').then(r => r.json()),
-    ]).then(([timeData, custData]) => {
+      fetch('/api/jobs').then(r => r.json()),
+    ]).then(([timeData, custData, jobData]) => {
       setEntries(timeData.time_entries || [])
       setCustomers((Array.isArray(custData) ? custData : []).filter(c => !c.name.startsWith('_')))
+      setJobs(Array.isArray(jobData) ? jobData : [])
       setLoading(false)
     }).catch(() => setLoading(false))
   }, [])
+
+  const customerJobs = jobs.filter(j => form.customer_id && String(j.customer_id) === form.customer_id)
+
+  function handleCustomerChange(e) {
+    setForm(f => ({ ...f, customer_id: e.target.value, job_id: '' }))
+  }
 
   async function handleSave() {
     const hours = form.hours || calcHours(form.arrive_time, form.depart_time)
@@ -49,9 +59,14 @@ export default function TimeEntry() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...form,
-          hours: parseFloat(hours),
           customer_id: parseInt(form.customer_id),
+          job_id: form.job_id ? parseInt(form.job_id) : null,
+          entry_date: form.entry_date,
+          arrive_time: form.arrive_time || null,
+          depart_time: form.depart_time || null,
+          hours: parseFloat(hours),
+          description: form.description,
+          cost_code: form.cost_code,
         })
       })
       const newEntry = await r.json()
@@ -63,6 +78,7 @@ export default function TimeEntry() {
         hours: '',
         description: '',
         cost_code: '',
+        job_id: '',
       }))
       setShowForm(false)
     } catch {
@@ -78,7 +94,6 @@ export default function TimeEntry() {
 
   const totalHours = filtered.reduce((s, e) => s + (e.hours || 0), 0)
 
-  // Group by date
   const byDate = filtered.reduce((acc, e) => {
     const d = e.entry_date || 'Unknown'
     if (!acc[d]) acc[d] = []
@@ -93,7 +108,6 @@ export default function TimeEntry() {
 
   return (
     <div className="space-y-5">
-      {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Time Tracking</h1>
         <button
@@ -104,7 +118,6 @@ export default function TimeEntry() {
         </button>
       </div>
 
-      {/* Quick Entry Form */}
       {showForm && (
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <h2 className="text-base font-semibold text-gray-900 mb-4">Log Time Entry</h2>
@@ -113,7 +126,7 @@ export default function TimeEntry() {
               <label className="block text-xs font-medium text-gray-700 mb-1">Customer *</label>
               <select
                 value={form.customer_id}
-                onChange={e => setForm(f => ({ ...f, customer_id: e.target.value }))}
+                onChange={handleCustomerChange}
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">Select customer...</option>
@@ -131,8 +144,24 @@ export default function TimeEntry() {
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Job (optional)</label>
+              <select
+                value={form.job_id}
+                onChange={e => setForm(f => ({ ...f, job_id: e.target.value }))}
+                disabled={!form.customer_id}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+              >
+                <option value="">{form.customer_id ? 'No specific job' : 'Select a customer first'}</option>
+                {customerJobs.map(j => (
+                  <option key={j.id} value={j.id}>
+                    {j.invoice_id || `#${j.id}`} — {j.start_date || 'no date'}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Arrive *</label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Arrive</label>
               <input
                 type="time"
                 value={form.arrive_time}
@@ -141,7 +170,7 @@ export default function TimeEntry() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Depart *</label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Depart</label>
               <input
                 type="time"
                 value={form.depart_time}
@@ -155,12 +184,24 @@ export default function TimeEntry() {
               </div>
             )}
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Job / Purpose</label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Hours (if not using times)</label>
+              <input
+                type="number"
+                step="0.25"
+                min="0"
+                value={form.hours}
+                onChange={e => setForm(f => ({ ...f, hours: e.target.value }))}
+                placeholder="e.g. 2.5"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Cost Code / Label</label>
               <input
                 type="text"
                 value={form.cost_code}
                 onChange={e => setForm(f => ({ ...f, cost_code: e.target.value }))}
-                placeholder="e.g. Johnson fence repair, supply run"
+                placeholder="e.g. fence repair, supply run"
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -193,7 +234,6 @@ export default function TimeEntry() {
         </div>
       )}
 
-      {/* Filter + Stats bar */}
       <div className="flex items-center gap-4 bg-white rounded-xl border border-gray-200 px-5 py-3">
         <div className="flex-1">
           <select
@@ -214,7 +254,6 @@ export default function TimeEntry() {
         </div>
       </div>
 
-      {/* Entries grouped by date */}
       <div className="space-y-4">
         {sortedDates.map(date => (
           <div key={date} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -229,6 +268,9 @@ export default function TimeEntry() {
                 <div key={entry.id} className="px-5 py-3 flex items-center justify-between">
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-gray-900">{entry.customer_name || '—'}</div>
+                    {entry.invoice_id && (
+                      <div className="text-xs text-blue-600 mt-0.5">{entry.invoice_id}</div>
+                    )}
                     {entry.start_time && entry.end_time && (
                       <div className="text-xs text-gray-400">{entry.start_time} &ndash; {entry.end_time}</div>
                     )}
@@ -245,7 +287,7 @@ export default function TimeEntry() {
                     <div className="text-sm font-semibold text-gray-900 tabular-nums">
                       {(entry.hours || 0).toFixed(2)}h
                     </div>
-                    {entry.source && entry.source !== 'manual' && (
+                    {entry.source && entry.source !== 'manual' && entry.source !== 'app' && (
                       <span className="text-xs text-gray-400">{entry.source}</span>
                     )}
                   </div>

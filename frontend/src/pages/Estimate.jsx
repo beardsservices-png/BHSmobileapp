@@ -28,6 +28,135 @@ function formatPhone(raw) {
   return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
 }
 
+// ── Award / Trash modal ──────────────────────────────────────────────────────
+function CloseEstimateModal({ est, onClose, onDone }) {
+  const [action, setAction] = useState(null) // 'award' | 'trash'
+  const [reason, setReason] = useState('')
+  const [working, setWorking] = useState(false)
+
+  async function handleAward() {
+    setWorking(true)
+    try {
+      const r = await fetch(`/api/jobs/${est.job_id}/convert`, { method: 'POST' })
+      if (!r.ok) throw new Error('Failed to award estimate')
+      onDone('awarded', est.job_id)
+    } catch (e) {
+      alert('Error: ' + e.message)
+    } finally {
+      setWorking(false)
+    }
+  }
+
+  async function handleTrash() {
+    if (!reason.trim()) { alert('Please enter a reason for trashing this estimate.'); return }
+    setWorking(true)
+    try {
+      const r = await fetch(`/api/jobs/${est.job_id}/trash`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      })
+      if (!r.ok) throw new Error('Failed to trash estimate')
+      onDone('trashed', est.job_id)
+    } catch (e) {
+      alert('Error: ' + e.message)
+    } finally {
+      setWorking(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
+        <div className="mb-4">
+          <h2 className="text-lg font-bold text-gray-900">Close Estimate</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {est.invoice_number} — {est.customer}
+          </p>
+          {est.total_amount > 0 && (
+            <p className="text-sm font-semibold text-gray-700 mt-1">{fmt(est.total_amount)}</p>
+          )}
+        </div>
+
+        {!action && (
+          <div className="flex gap-3">
+            <button
+              onClick={() => setAction('award')}
+              className="flex-1 bg-green-600 text-white py-3 rounded-xl font-semibold text-sm hover:bg-green-700 transition-colors"
+            >
+              Award
+              <div className="text-xs font-normal opacity-80 mt-0.5">Convert to invoice</div>
+            </button>
+            <button
+              onClick={() => setAction('trash')}
+              className="flex-1 bg-red-50 text-red-700 border border-red-200 py-3 rounded-xl font-semibold text-sm hover:bg-red-100 transition-colors"
+            >
+              Trash
+              <div className="text-xs font-normal opacity-70 mt-0.5">Mark as rejected</div>
+            </button>
+          </div>
+        )}
+
+        {action === 'award' && (
+          <div className="space-y-4">
+            <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-sm text-green-800">
+              This estimate will be converted to an invoice (BHS prefix) and removed from the estimates list.
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleAward}
+                disabled={working}
+                className="flex-1 bg-green-600 text-white py-2.5 rounded-lg font-semibold text-sm hover:bg-green-700 disabled:opacity-50"
+              >
+                {working ? 'Converting...' : 'Confirm Award'}
+              </button>
+              <button onClick={() => setAction(null)} className="px-4 py-2.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
+                Back
+              </button>
+            </div>
+          </div>
+        )}
+
+        {action === 'trash' && (
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1.5">Reason for rejecting *</label>
+              <textarea
+                rows={3}
+                value={reason}
+                onChange={e => setReason(e.target.value)}
+                placeholder="e.g. Customer went with another contractor, budget too high..."
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400"
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleTrash}
+                disabled={working}
+                className="flex-1 bg-red-600 text-white py-2.5 rounded-lg font-semibold text-sm hover:bg-red-700 disabled:opacity-50"
+              >
+                {working ? 'Trashing...' : 'Confirm Trash'}
+              </button>
+              <button onClick={() => setAction(null)} className="px-4 py-2.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">
+                Back
+              </button>
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={onClose}
+          className="mt-4 w-full text-sm text-gray-400 hover:text-gray-600 py-1.5"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function Estimate() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
@@ -35,6 +164,8 @@ export default function Estimate() {
   const [categories, setCategories]     = useState([])
   const [pricingHints, setPricingHints] = useState({})
   const [saving, setSaving]             = useState(false)
+  const [openEstimates, setOpenEstimates] = useState([])
+  const [closeModal, setCloseModal]     = useState(null) // est object or null
 
   // New-customer inline form
   const [showNewCust, setShowNewCust]   = useState(false)
@@ -60,12 +191,20 @@ export default function Estimate() {
       fetch('/api/customers').then(r => r.json()),
       fetch('/api/service-categories').then(r => r.json()),
       fetch('/api/pricing/suggest-all').then(r => r.json()),
-    ]).then(([custData, catData, priceData]) => {
+      fetch('/api/estimates').then(r => r.json()),
+    ]).then(([custData, catData, priceData, estData]) => {
       setCustomers((Array.isArray(custData) ? custData : []).filter(c => !c.name.startsWith('_')))
       setCategories(Array.isArray(catData) ? catData : [])
       setPricingHints(priceData || {})
+      setOpenEstimates(estData.estimates || [])
     })
   }, [])
+
+  function handleModalDone(action, jobId) {
+    setOpenEstimates(prev => prev.filter(e => e.job_id !== jobId))
+    setCloseModal(null)
+    if (action === 'awarded') navigate(`/filing-cabinet?job=${jobId}`)
+  }
 
   function updateForm(field, value) {
     setForm(f => ({ ...f, [field]: value }))
@@ -123,7 +262,6 @@ export default function Estimate() {
     }
   }
 
-  // Create a new customer on the fly
   async function handleCreateCustomer() {
     if (!newCust.name.trim()) { alert('Customer name is required.'); return }
     setCreatingCust(true)
@@ -146,7 +284,6 @@ export default function Estimate() {
     }
   }
 
-  // Ask Claude for pricing suggestion on a line item
   async function fetchClaudeSuggestion(idx) {
     const svc = form.services[idx]
     if (!svc.original_description.trim()) { alert('Enter a service description first.'); return }
@@ -236,7 +373,52 @@ export default function Estimate() {
   return (
     <div className="max-w-5xl mx-auto space-y-5 pb-10">
 
-      {/* Header */}
+      {closeModal && (
+        <CloseEstimateModal
+          est={closeModal}
+          onClose={() => setCloseModal(null)}
+          onDone={handleModalDone}
+        />
+      )}
+
+      {/* ── Open Estimates list ─────────────────────────────────────────── */}
+      {openEstimates.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 bg-gray-50">
+            <h2 className="text-sm font-semibold text-gray-700">
+              Open Estimates
+              <span className="ml-2 text-xs font-normal text-gray-400">({openEstimates.length})</span>
+            </h2>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {openEstimates.map(est => (
+              <div key={est.job_id} className="flex items-center justify-between px-5 py-3 hover:bg-gray-50">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-gray-900">{est.customer}</div>
+                  <div className="text-xs text-gray-400 mt-0.5 flex gap-3">
+                    <span>{est.invoice_number}</span>
+                    {est.start_date && <span>{est.start_date}</span>}
+                    {est.estimated_days && <span>{est.estimated_days}d est.</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 ml-4 flex-shrink-0">
+                  {est.total_amount > 0 && (
+                    <span className="text-sm font-semibold text-gray-700">{fmt(est.total_amount)}</span>
+                  )}
+                  <button
+                    onClick={() => setCloseModal(est)}
+                    className="text-xs px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium transition-colors"
+                  >
+                    Close Estimate
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── New Estimate form ───────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">New Estimate</h1>
         <div className="flex gap-3">
@@ -262,7 +444,6 @@ export default function Estimate() {
         <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">Job Information</h2>
         <div className="grid grid-cols-2 gap-4">
 
-          {/* Customer selector */}
           <div className="col-span-2 md:col-span-1">
             <label className="block text-xs text-gray-500 mb-1">Customer *</label>
             <div className="flex gap-2">
@@ -295,7 +476,6 @@ export default function Estimate() {
             />
           </div>
 
-          {/* New Customer inline form */}
           {showNewCust && (
             <div className="col-span-2 bg-blue-50 border border-blue-200 rounded-xl p-4">
               <div className="flex items-center justify-between mb-3">
@@ -427,7 +607,6 @@ export default function Estimate() {
           </button>
         </div>
 
-        {/* Column headers */}
         <div className="grid gap-2 px-5 py-2 text-xs text-gray-400 font-medium bg-gray-50 border-b border-gray-100"
              style={{gridTemplateColumns: '3fr 1.5fr 55px 80px 80px 80px 28px'}}>
           <div>Description</div>
@@ -459,7 +638,6 @@ export default function Estimate() {
                     className={INPUT_SM}
                   />
 
-                  {/* Category: group top-level and sub */}
                   <select
                     value={svc.category}
                     onChange={e => updateService(idx, 'category', e.target.value)}
@@ -483,6 +661,7 @@ export default function Estimate() {
                   >
                     <option value="labor">Labor</option>
                     <option value="materials">Materials</option>
+                    <option value="reimbursed">Reimb.</option>
                   </select>
 
                   <input
@@ -539,7 +718,6 @@ export default function Estimate() {
                     </>
                   )}
 
-                  {/* Claude suggestion */}
                   {!claude && (
                     <button
                       onClick={() => fetchClaudeSuggestion(idx)}
@@ -621,7 +799,6 @@ export default function Estimate() {
         </div>
       </div>
 
-      {/* Bottom actions */}
       <div className="flex justify-end gap-3">
         <button
           onClick={() => handleSave(false)}

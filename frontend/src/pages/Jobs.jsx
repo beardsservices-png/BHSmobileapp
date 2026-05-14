@@ -57,7 +57,7 @@ export default function Jobs() {
 
       {/* Status filter tabs */}
       <div className="flex gap-2 bg-gray-100 p-1 rounded-lg w-fit">
-        {['all', 'completed', 'estimate', 'pending'].map(s => (
+        {['all', 'completed', 'pending', 'paid'].map(s => (
           <button
             key={s}
             onClick={() => setStatusFilter(s)}
