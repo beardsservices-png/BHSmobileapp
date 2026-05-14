@@ -18,6 +18,7 @@ export default function Customers() {
   const [form, setForm] = useState({ name: '', address: '', phone: '', email: '', notes: '', cya_notes: '' })
   const [saving, setSaving] = useState(false)
   const [calcMileage, setCalcMileage] = useState(false)
+  const [mobileView, setMobileView] = useState('list') // 'list' | 'detail'
 
   useEffect(() => {
     fetch('/api/customers')
@@ -117,13 +118,13 @@ export default function Customers() {
 
   return (
     <div className="flex h-full gap-0 -m-6">
-      {/* Left panel - customer list */}
-      <div className="w-72 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+      {/* Left panel - customer list (always visible on md+, hidden on mobile when detail shown) */}
+      <div className={`${mobileView === 'detail' ? 'hidden' : 'flex'} md:flex w-full md:w-72 bg-white border-r border-gray-200 flex-col flex-shrink-0`}>
         <div className="p-4 border-b border-gray-100">
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-lg font-bold text-gray-900">Customers</h1>
             <button
-              onClick={() => setShowForm(true)}
+              onClick={() => { setShowForm(true); setSelected(null); setMobileView('detail') }}
               className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700"
             >
               + New
@@ -141,13 +142,13 @@ export default function Customers() {
           {filtered.map(c => (
             <button
               key={c.id}
-              onClick={() => setSelected(c)}
+              onClick={() => { setSelected(c); setShowForm(false); setMobileView('detail') }}
               className={`w-full text-left px-4 py-3 border-b border-gray-50 hover:bg-gray-50 transition-colors ${selected?.id === c.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''}`}
             >
               <div className="font-medium text-gray-900 text-sm">{c.name}</div>
               <div className="text-xs text-gray-500 mt-0.5 flex gap-2">
                 <span>{c.job_count || 0} jobs</span>
-                {c.total_revenue > 0 && <span className="text-green-600">{fmt(c.total_revenue)}</span>}
+                {c.last_job_date && <span className="text-gray-400">{c.last_job_date}</span>}
               </div>
               {c.cya_notes && (
                 <div className="text-xs text-amber-700 mt-0.5 truncate">
@@ -165,8 +166,22 @@ export default function Customers() {
         </div>
       </div>
 
-      {/* Right panel - detail */}
-      <div className="flex-1 overflow-y-auto bg-gray-50 p-6">
+      {/* Right panel - detail (always visible on md+, hidden on mobile when list shown) */}
+      <div className={`${mobileView === 'list' ? 'hidden' : 'flex'} md:flex flex-col flex-1 overflow-y-auto bg-gray-50`}>
+        {/* Mobile back button */}
+        <div className="md:hidden flex items-center gap-2 px-4 py-3 bg-white border-b border-gray-200">
+          <button
+            onClick={() => { setMobileView('list'); setShowForm(false) }}
+            className="flex items-center gap-1 text-sm text-blue-600 font-medium"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            Customers
+          </button>
+          {selected && <span className="text-sm text-gray-500 truncate">/ {selected.name}</span>}
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 md:p-6">
         {showForm && (
           <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
             <div className="flex items-center justify-between mb-4">
@@ -282,6 +297,7 @@ export default function Customers() {
             onDetailChange={setDetail}
           />
         )}
+        </div>
       </div>
     </div>
   )

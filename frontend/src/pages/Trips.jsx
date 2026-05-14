@@ -116,11 +116,12 @@ export default function Trips() {
     try {
       const url    = editId ? `/api/trips/${editId}` : '/api/trips'
       const method = editId ? 'PUT' : 'POST'
+      const { _milesAutoTime, ...formData } = form
       const r = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...form,
+          ...formData,
           miles:              parseFloat(form.miles) || 0,
           drive_time_minutes: form.drive_time_minutes ? parseInt(form.drive_time_minutes) : null,
           customer_id:        form.customer_id ? parseInt(form.customer_id) : null,
@@ -323,13 +324,22 @@ export default function Trips() {
             )}
 
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Miles *</label>
+              <label className="block text-xs text-gray-500 mb-1">Miles (one-way) *</label>
               <input
                 type="number"
                 step="0.1"
                 min="0"
                 value={form.miles}
-                onChange={e => setForm(f => ({ ...f, miles: e.target.value }))}
+                onChange={e => {
+                  const mi = parseFloat(e.target.value) || 0
+                  const autoMins = mi > 0 ? String(Math.round((mi / 30) * 60 / 5) * 5) : ''
+                  setForm(f => ({
+                    ...f,
+                    miles: e.target.value,
+                    drive_time_minutes: f.drive_time_minutes === '' || f._milesAutoTime ? autoMins : f.drive_time_minutes,
+                    _milesAutoTime: true,
+                  }))
+                }}
                 placeholder="0.0"
                 className={INPUT}
               />
@@ -344,13 +354,16 @@ export default function Trips() {
               <label className="block text-xs text-gray-500 mb-1">Drive Time (minutes)</label>
               <input
                 type="number"
-                step="1"
+                step="5"
                 min="0"
                 value={form.drive_time_minutes}
-                onChange={e => setForm(f => ({ ...f, drive_time_minutes: e.target.value }))}
-                placeholder="e.g. 25"
+                onChange={e => setForm(f => ({ ...f, drive_time_minutes: e.target.value, _milesAutoTime: false }))}
+                placeholder="auto-estimated"
                 className={INPUT}
               />
+              {form._milesAutoTime && form.drive_time_minutes && (
+                <p className="text-xs text-gray-400 mt-1">Estimated at 30 mph avg — tap to adjust</p>
+              )}
             </div>
 
             <div className="col-span-2">

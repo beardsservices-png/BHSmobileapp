@@ -22,10 +22,15 @@ app = Flask(__name__)
 CORS(app)
 
 # Database path — Railway sets DB_PATH env var pointing to a volume
-DB_PATH = os.environ.get(
-    'DB_PATH',
-    os.path.join(os.path.dirname(__file__), '..', 'data', 'beard_business.db')
-)
+_BUNDLED_DB = os.path.join(os.path.dirname(__file__), '..', 'data', 'beard_business.db')
+DB_PATH = os.environ.get('DB_PATH', _BUNDLED_DB)
+
+# If running on Railway with a Volume and the volume DB doesn't exist yet,
+# seed it from the bundled copy so existing data carries over.
+if os.environ.get('DB_PATH') and not os.path.exists(DB_PATH) and os.path.exists(_BUNDLED_DB):
+    import shutil as _shutil
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    _shutil.copy2(_BUNDLED_DB, DB_PATH)
 
 # React build output (served in production)
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist')
@@ -204,6 +209,9 @@ def dashboard():
         sp_date_filter = ''
         sp_date_params = []
 
+    exp_date_filter = te_date_filter.replace('entry_date', 'expense_date')
+    exp_date_params = te_date_params
+
     # Total labor / materials from invoices
     cursor.execute(f'''
         SELECT SUM(i.total_labor) as labor, SUM(i.total_materials) as materials
@@ -220,7 +228,12 @@ def dashboard():
     ''', te_date_params)
     hours = cursor.fetchone()
 
-    cursor.execute("SELECT COUNT(*) as count FROM customers WHERE name != '_UNASSIGNED'")
+    cursor.execute(f'''
+        SELECT COUNT(DISTINCT j.customer_id) as count
+        FROM jobs j
+        JOIN customers c ON j.customer_id = c.id
+        WHERE c.name != '_UNASSIGNED' AND j.status != 'estimate' {job_date_filter}
+    ''', job_date_params)
     customers = cursor.fetchone()
 
     cursor.execute(f'''
@@ -287,7 +300,7 @@ def dashboard():
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
-        WHERE 1=1 {job_date_filter}
+        WHERE j.status != 'estimate' {job_date_filter}
         ORDER BY j.start_date DESC
         LIMIT 10
     ''', job_date_params)
@@ -347,6 +360,14 @@ def dashboard():
     ''', job_date_params)
     est_row = cursor.fetchone()
 
+    # Total expenses in period
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(cost), 0) as total
+        FROM materials_expenses
+        WHERE 1=1 {exp_date_filter}
+    ''', exp_date_params)
+    expenses_row = cursor.fetchone()
+
     # Hourly rate: exclude incomplete jobs from both labor and hours
     cursor2 = conn.cursor()
     cursor2.execute(f'''
@@ -369,13 +390,18 @@ def dashboard():
 
     total_hours = hours['total'] or 0
     total_labor = revenue['labor'] or 0
+    total_materials = revenue['materials'] or 0
+    total_expenses = expenses_row['total'] or 0
+    total_profit = total_labor + total_materials - total_expenses
     rate_hours = rate_hours_row['total'] or 0
     rate_labor = rate_labor_row['labor'] or 0
 
     response = {
         'total_labor': total_labor,
-        'total_materials': revenue['materials'] or 0,
-        'total_revenue': total_labor + (revenue['materials'] or 0),
+        'total_materials': total_materials,
+        'total_revenue': total_labor + total_materials,
+        'total_expenses': total_expenses,
+        'total_profit': total_profit,
         'total_hours': total_hours,
         'avg_hourly_rate': round(rate_labor / rate_hours, 2) if rate_hours > 0 else 0,
         'avg_days_per_job': round(avg_days_row['avg_days'], 1) if avg_days_row and avg_days_row['avg_days'] else 0,
@@ -413,10 +439,12 @@ def list_customers():
         SELECT c.id, c.name, c.phone, c.email, c.address, c.notes, c.cya_notes, c.mileage_from_home,
                COALESCE(j_count.cnt, 0) as job_count,
                COALESCE(inv.labor, 0) as total_labor,
-               COALESCE(te.hours, 0) as total_hours
+               COALESCE(te.hours, 0) as total_hours,
+               j_recent.last_job_date
         FROM customers c
         LEFT JOIN (
-            SELECT customer_id, COUNT(*) as cnt FROM jobs GROUP BY customer_id
+            SELECT customer_id, COUNT(*) as cnt FROM jobs
+            WHERE status NOT IN ('estimate', 'rejected') GROUP BY customer_id
         ) j_count ON c.id = j_count.customer_id
         LEFT JOIN (
             SELECT customer_id, SUM(total_labor) as labor FROM invoices GROUP BY customer_id
@@ -424,8 +452,12 @@ def list_customers():
         LEFT JOIN (
             SELECT customer_id, SUM(hours) as hours FROM time_entries GROUP BY customer_id
         ) te ON c.id = te.customer_id
+        LEFT JOIN (
+            SELECT customer_id, MAX(start_date) as last_job_date FROM jobs
+            WHERE status NOT IN ('estimate', 'rejected') GROUP BY customer_id
+        ) j_recent ON c.id = j_recent.customer_id
         WHERE c.name != '_UNASSIGNED'
-        ORDER BY c.name
+        ORDER BY j_recent.last_job_date DESC, c.name
     ''')
     customers = rows_to_list(cursor.fetchall())
     conn.close()
@@ -568,16 +600,24 @@ def list_jobs():
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('''
-        SELECT j.id, j.invoice_id, j.start_date, j.status,
+    customer_id = request.args.get('customer_id')
+    where = "WHERE j.status != 'estimate'"
+    params = []
+    if customer_id:
+        where += ' AND j.customer_id = ?'
+        params.append(customer_id)
+
+    cursor.execute(f'''
+        SELECT j.id, j.customer_id, j.invoice_id, j.start_date, j.status,
                c.name as customer,
                i.total_labor, i.total_materials,
                (SELECT SUM(hours) FROM time_entries WHERE job_id = j.id) as hours
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
+        {where}
         ORDER BY j.start_date DESC
-    ''')
+    ''', params)
     jobs = rows_to_list(cursor.fetchall())
     conn.close()
     return jsonify(jobs)
@@ -719,6 +759,59 @@ def convert_to_invoice(job_id):
     return jsonify({'message': 'Converted to invoice', 'job_id': job_id})
 
 
+@app.route('/api/jobs/<int:job_id>/trash', methods=['POST'])
+def trash_estimate(job_id):
+    """Mark an estimate as rejected (trashed) with an optional reason."""
+    data = request.json or {}
+    reason = data.get('reason', '')
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    job = cursor.execute('SELECT id, status FROM jobs WHERE id = ?', (job_id,)).fetchone()
+    if not job:
+        conn.close()
+        return jsonify({'error': 'Job not found'}), 404
+    if job['status'] != 'estimate':
+        conn.close()
+        return jsonify({'error': 'Job is not an estimate'}), 400
+
+    cursor.execute(
+        "UPDATE jobs SET status = 'rejected', notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END WHERE id = ?",
+        (f'[Rejected] {reason}', f'[Rejected] {reason}', job_id)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Estimate trashed', 'job_id': job_id})
+
+
+@app.route('/api/estimates')
+def list_estimates():
+    """List all active (non-awarded, non-rejected) estimates."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT j.id as job_id,
+               COALESCE(i.invoice_number, j.invoice_id) as invoice_number,
+               c.name as customer,
+               j.status,
+               j.start_date,
+               j.estimated_days,
+               j.notes,
+               COALESCE(i.total_labor, 0) as total_labor,
+               COALESCE(i.total_materials, 0) as total_materials,
+               COALESCE(i.total_amount, i.total_labor + i.total_materials, 0) as total_amount
+        FROM jobs j
+        JOIN customers c ON j.customer_id = c.id
+        LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE j.status = 'estimate'
+        ORDER BY j.start_date DESC, j.id DESC
+    ''')
+    estimates = rows_to_list(cursor.fetchall())
+    conn.close()
+    return jsonify({'estimates': estimates})
+
+
 # ============================================================
 # FILING CABINET (main UI - browse/edit all invoices)
 # ============================================================
@@ -748,6 +841,7 @@ def filing_cabinet_list():
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE j.status NOT IN ('estimate', 'rejected')
         ORDER BY j.start_date DESC, j.id DESC
     ''')
     jobs = rows_to_list(cursor.fetchall())
@@ -1313,8 +1407,9 @@ def list_time_entries():
     end_date = request.args.get('end_date')
 
     query = '''
-        SELECT t.id, t.entry_date, t.start_time, t.end_time, t.hours, t.description, t.cost_code,
-               c.name as customer, j.invoice_id
+        SELECT t.id, t.customer_id, t.job_id, t.entry_date, t.start_time, t.end_time,
+               t.hours, t.description, t.cost_code, t.source,
+               c.name as customer_name, j.invoice_id, j.id as job_id_check
         FROM time_entries t
         LEFT JOIN customers c ON t.customer_id = c.id
         LEFT JOIN jobs j ON t.job_id = j.id
@@ -1332,12 +1427,12 @@ def list_time_entries():
         query += ' AND t.entry_date <= ?'
         params.append(end_date)
 
-    query += ' ORDER BY t.entry_date DESC LIMIT 100'
+    query += ' ORDER BY t.entry_date DESC LIMIT 500'
 
     cursor.execute(query, params)
     entries = rows_to_list(cursor.fetchall())
     conn.close()
-    return jsonify(entries)
+    return jsonify({'time_entries': entries})
 
 
 @app.route('/api/time-entries', methods=['POST'])
@@ -1368,8 +1463,18 @@ def add_time_entry():
           arrive, depart, hours, data.get('description', ''), data.get('cost_code', '')))
     entry_id = cursor.lastrowid
     conn.commit()
+    cursor.execute('''
+        SELECT t.id, t.customer_id, t.job_id, t.entry_date, t.start_time, t.end_time,
+               t.hours, t.description, t.cost_code, t.source,
+               c.name as customer_name, j.invoice_id
+        FROM time_entries t
+        LEFT JOIN customers c ON t.customer_id = c.id
+        LEFT JOIN jobs j ON t.job_id = j.id
+        WHERE t.id = ?
+    ''', (entry_id,))
+    entry = row_to_dict(cursor.fetchone())
     conn.close()
-    return jsonify({'id': entry_id, 'message': 'Time entry added'}), 201
+    return jsonify(entry), 201
 
 
 @app.route('/api/time-entries/<int:te_id>', methods=['PUT'])
@@ -1827,6 +1932,202 @@ def pricing_suggest_all():
 
     conn.close()
     return jsonify(result)
+
+
+# ============================================================
+# BUSINESS INSIGHTS (Claude-powered analysis)
+# ============================================================
+
+_insights_cache = {}  # key -> (timestamp, payload)
+
+@app.route('/api/insights')
+def get_insights():
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not set', 'available': False}), 200
+
+    force = request.args.get('force') == '1'
+    cache_key = 'insights_v1'
+    now = _time.time()
+    if not force and cache_key in _insights_cache:
+        ts, cached = _insights_cache[cache_key]
+        if now - ts < 3600:
+            return jsonify(cached)
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Monthly jobs + revenue, last 24 months
+    cursor.execute('''
+        SELECT SUBSTR(j.start_date, 1, 7) as month,
+               COUNT(j.id) as job_count,
+               COALESCE(SUM(i.total_labor + i.total_materials), 0) as revenue
+        FROM jobs j
+        LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE j.start_date >= date('now', '-24 months')
+          AND j.status NOT IN ('estimate', 'rejected')
+        GROUP BY month ORDER BY month
+    ''')
+    monthly = rows_to_list(cursor.fetchall())
+
+    # Top service categories with seasonal month breakdown
+    cursor.execute('''
+        SELECT sp.category,
+               COUNT(DISTINCT sp.job_id) as job_count,
+               ROUND(COALESCE(SUM(sp.amount * COALESCE(sp.quantity, 1)), 0), 0) as total_revenue,
+               ROUND(AVG(sp.amount), 0) as avg_per_job,
+               GROUP_CONCAT(DISTINCT CAST(CAST(SUBSTR(j.start_date, 6, 2) AS INTEGER) AS TEXT)) as months
+        FROM services_performed sp
+        JOIN jobs j ON sp.job_id = j.id
+        WHERE j.start_date >= date('now', '-24 months')
+          AND sp.service_type = 'labor'
+          AND sp.category IS NOT NULL AND sp.category != ''
+        GROUP BY sp.category
+        HAVING job_count > 0
+        ORDER BY total_revenue DESC
+        LIMIT 15
+    ''')
+    categories = rows_to_list(cursor.fetchall())
+
+    # Customer repeat rate
+    cursor.execute('''
+        SELECT customer_id, COUNT(*) as cnt
+        FROM jobs
+        WHERE start_date >= date('now', '-24 months')
+          AND status NOT IN ('estimate', 'rejected')
+        GROUP BY customer_id
+    ''')
+    cust_rows = cursor.fetchall()
+    repeat_count  = sum(1 for r in cust_rows if r['cnt'] > 1)
+    onetime_count = sum(1 for r in cust_rows if r['cnt'] == 1)
+
+    # 24-month totals
+    cursor.execute('''
+        SELECT COALESCE(SUM(i.total_labor + i.total_materials), 0) as revenue,
+               COUNT(DISTINCT j.id) as jobs,
+               COUNT(DISTINCT j.customer_id) as customers,
+               COALESCE(SUM(i.total_labor), 0) as labor_revenue,
+               COALESCE(SUM(i.total_materials), 0) as materials_revenue
+        FROM jobs j
+        LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE j.start_date >= date('now', '-24 months')
+          AND j.status NOT IN ('estimate', 'rejected')
+    ''')
+    totals = dict(cursor.fetchone())
+
+    cursor.execute('''
+        SELECT COALESCE(SUM(cost), 0) as total
+        FROM materials_expenses
+        WHERE expense_date >= date('now', '-24 months')
+    ''')
+    expenses_total = (cursor.fetchone()['total'] or 0)
+
+    # Avg hourly rate (last 24 months)
+    cursor.execute('''
+        SELECT SUM(i.total_labor) as labor, SUM(te.hours) as hours
+        FROM jobs j
+        JOIN invoices i ON j.id = i.job_id
+        JOIN (SELECT job_id, SUM(hours) as hours FROM time_entries
+              WHERE entry_date >= date('now', '-24 months') AND job_id IS NOT NULL
+              GROUP BY job_id) te ON j.id = te.job_id
+        WHERE j.start_date >= date('now', '-24 months')
+    ''')
+    rate_row = cursor.fetchone()
+    avg_hr = round((rate_row['labor'] or 0) / rate_row['hours'], 2) if rate_row and (rate_row['hours'] or 0) > 0 else 0
+
+    conn.close()
+
+    # Summarise busy/slow months from monthly job counts
+    mo_names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    month_agg = {}
+    for m in monthly:
+        mo = int(m['month'][5:7])
+        month_agg[mo] = month_agg.get(mo, 0) + m['job_count']
+    ranked = sorted(month_agg.items(), key=lambda x: x[1], reverse=True)
+    busy_months = [mo_names[m-1] for m, _ in ranked[:3] if _ > 0]
+    slow_months  = [mo_names[m-1] for m, _ in ranked[-3:] if _ > 0]
+
+    revenue = totals.get('revenue') or 0
+    profit  = revenue - expenses_total
+
+    summary = {
+        'business': "Beard's Home Services, one-man handyman, Mountain Home AR (rural Ozarks)",
+        'data_period': 'last 24 months',
+        'totals': {
+            'jobs': totals.get('jobs', 0),
+            'customers_served': totals.get('customers', 0),
+            'repeat_customers': repeat_count,
+            'one_time_customers': onetime_count,
+            'total_revenue': round(revenue),
+            'labor_revenue': round(totals.get('labor_revenue') or 0),
+            'materials_revenue': round(totals.get('materials_revenue') or 0),
+            'total_expenses': round(expenses_total),
+            'profit': round(profit),
+            'avg_hourly_rate': avg_hr,
+        },
+        'monthly_breakdown': monthly,
+        'service_categories': categories,
+        'busiest_months': busy_months,
+        'slowest_months': slow_months,
+    }
+
+    prompt = f"""You are a no-nonsense business advisor for Brian, who runs a one-man handyman business called Beard's Home Services in Mountain Home, Arkansas. Analyze his real business data from the last 24 months and produce 6 specific, actionable insights.
+
+DATA:
+{json.dumps(summary, indent=2)}
+
+Month numbers in 'months' field: 1=Jan 2=Feb 3=Mar 4=Apr 5=May 6=Jun 7=Jul 8=Aug 9=Sep 10=Oct 11=Nov 12=Dec
+
+INSTRUCTIONS:
+- Be specific: name actual categories, months, and dollar amounts from the data
+- Each action must be something Brian can do in the next 2-4 weeks
+- Look for: seasonal timing windows, high-value underutilized service types, slow-season gap fillers, repeat customer opportunities, pricing adjustments, and marketing timing
+- If repeat_customers is low relative to total, flag it
+- If certain categories spike in certain months, flag the "book ahead" window 2 months earlier
+- Think like a contractor who knows the Ozarks market
+
+Return ONLY a valid JSON array of exactly 6 objects, no other text. Each object:
+{{
+  "type": "seasonal" | "pricing" | "marketing" | "focus" | "efficiency" | "warning",
+  "title": "5-8 word punchy headline",
+  "insight": "2-3 sentences grounded in the actual numbers",
+  "action": "Specific thing Brian should do in the next 2-4 weeks",
+  "priority": "high" | "medium" | "low"
+}}"""
+
+    try:
+        req_data = json.dumps({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 2000,
+            'messages': [{'role': 'user', 'content': prompt}]
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=req_data,
+            headers={
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+        text = result['content'][0]['text'].strip()
+        # Strip markdown code fences if present
+        if text.startswith('```'):
+            text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        insights = json.loads(text)
+        payload = {'insights': insights, 'available': True, 'summary': {
+            'jobs': summary['totals']['jobs'],
+            'revenue': summary['totals']['total_revenue'],
+            'profit': summary['totals']['profit'],
+            'busiest': busy_months,
+            'slowest': slow_months,
+        }}
+        _insights_cache[cache_key] = (_time.time(), payload)
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({'error': str(e), 'available': False}), 200
 
 
 # ============================================================
@@ -2823,6 +3124,17 @@ def restore_db():
     count = conn.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
     conn.close()
     return jsonify({'ok': True, 'customers': count, 'message': 'Database restored'})
+
+
+@app.route('/api/admin/backup-db', methods=['GET'])
+def backup_db():
+    """Download the live database file (requires admin key)."""
+    from flask import send_file
+    key = request.headers.get('X-Admin-Key', '') or request.args.get('key', '')
+    if key != os.environ.get('ADMIN_KEY', ''):
+        return jsonify({'error': 'unauthorized'}), 401
+    return send_file(DB_PATH, as_attachment=True, download_name='beard_business.db',
+                     mimetype='application/x-sqlite3')
 
 
 # ============================================================

@@ -97,6 +97,7 @@ export default function FilingCabinet() {
     expense_date: today, expense_category: 'Fuel & Transportation',
     cost: '', vendor: '', notes: '',
   })
+  const [mobileView, setMobileView] = useState('list') // 'list' | 'detail'
   const [gapSections, setGapSections] = useState({
     missing_time: true, unlinked: true, overhead: true, suggested: true,
   })
@@ -368,7 +369,7 @@ export default function FilingCabinet() {
     <div className="flex h-full gap-0 -m-6">
 
       {/* ══ LEFT SIDEBAR ══════════════════════════════════════════ */}
-      <div className="w-72 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+      <div className={`${mobileView === 'detail' ? 'hidden' : 'flex'} md:flex w-full md:w-72 bg-white border-r border-gray-200 flex-col flex-shrink-0`}>
         <div className="p-4 border-b border-gray-100">
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-lg font-bold text-gray-900">Filing Cabinet</h1>
@@ -396,7 +397,7 @@ export default function FilingCabinet() {
               return (
                 <button
                   key={tab.key}
-                  onClick={() => setStatusFilter(tab.key)}
+                  onClick={() => { setStatusFilter(tab.key); if (tab.key === 'gaps') setMobileView('detail') }}
                   className={`flex-1 py-1 text-xs rounded-md font-medium transition-colors flex items-center justify-center gap-1 ${
                     isActive
                       ? isGaps ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'
@@ -422,7 +423,7 @@ export default function FilingCabinet() {
             return (
               <button
                 key={job.job_id}
-                onClick={() => setSelectedId(job.job_id)}
+                onClick={() => { setSelectedId(job.job_id); setMobileView('detail') }}
                 className={`w-full text-left px-4 py-3 border-b border-gray-50 hover:bg-gray-50 transition-colors ${
                   isSelected ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''
                 }`}
@@ -464,7 +465,21 @@ export default function FilingCabinet() {
       </div>
 
       {/* ══ RIGHT DOSSIER PANEL ═══════════════════════════════════ */}
-      <div className="flex-1 overflow-y-auto bg-gray-50">
+      <div className={`${mobileView === 'list' ? 'hidden' : 'flex'} md:flex flex-col flex-1 overflow-y-auto bg-gray-50`}>
+        {/* Mobile back button */}
+        <div className="md:hidden flex items-center gap-2 px-4 py-3 bg-white border-b border-gray-200 flex-shrink-0">
+          <button
+            onClick={() => setMobileView('list')}
+            className="flex items-center gap-1 text-sm text-blue-600 font-medium"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+            Filing Cabinet
+          </button>
+          {detail && <span className="text-sm text-gray-500 truncate">/ {detail.customer_name || detail.invoice_id}</span>}
+        </div>
+        <div className="flex-1 overflow-y-auto">
 
         {/* ── GAPS VIEW ─────────────────────────────────────────── */}
         {statusFilter === 'gaps' && (
@@ -1693,6 +1708,7 @@ function DataGapsPanel({
             </>
           )
         )}
+        </div>
       </div>
     </div>
   )

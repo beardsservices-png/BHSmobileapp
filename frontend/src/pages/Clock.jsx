@@ -2,6 +2,14 @@ import { useState, useEffect, useRef } from 'react'
 
 const LS_KEY = 'bhs_clock_v1'
 
+const WORK_PURPOSES = [
+  { value: 'on_site',         label: 'On-Site Work',            icon: '🔨' },
+  { value: 'site_assessment', label: 'Site Assessment / Estimate', icon: '📋' },
+  { value: 'material_run',    label: 'Material / Supply Run',   icon: '🛒' },
+  { value: 'debris_haul',     label: 'Debris Haul-Off',         icon: '🚚' },
+  { value: 'other',           label: 'Other',                    icon: '📝' },
+]
+
 function fmtElapsed(seconds) {
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
@@ -14,20 +22,26 @@ function fmtHours(ms) {
 }
 
 export default function Clock() {
-  // phase: idle | locating | confirming | running | wrapping | trip
+  // phase: idle | locating | confirming | context | running | wrapping | trip
   const [phase, setPhase] = useState('idle')
   const [candidates, setCandidates] = useState([])
   const [allCustomers, setAllCustomers] = useState([])
+  const [customerJobs, setCustomerJobs] = useState([])
   const [showAll, setShowAll] = useState(false)
   const [selected, setSelected] = useState(null)
+  const [jobId, setJobId] = useState('')
+  const [workPurpose, setWorkPurpose] = useState('')
   const [startTs, setStartTs] = useState(null)
   const [elapsed, setElapsed] = useState(0)
   const [description, setDescription] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [tripMiles, setTripMiles] = useState('')
+  const [tripMinutes, setTripMinutes] = useState('')
   const [tripSaving, setTripSaving] = useState(false)
   const [savedDate, setSavedDate] = useState('')
+  const [priorHours, setPriorHours] = useState(null) // hours already logged to this customer
+  const [alertFired, setAlertFired] = useState(false)
   const timerRef = useRef(null)
 
   // Restore active session from localStorage
@@ -35,11 +49,22 @@ export default function Clock() {
     try {
       const raw = localStorage.getItem(LS_KEY)
       if (raw) {
-        const { customer, startTs: ts } = JSON.parse(raw)
+        const { customer, startTs: ts, jobId: jid, workPurpose: wp } = JSON.parse(raw)
+        if (jid) setJobId(jid)
+        if (wp) setWorkPurpose(wp)
         setSelected(customer)
         setStartTs(ts)
-        setElapsed(Math.floor((Date.now() - ts) / 1000))
+        const secs = Math.floor((Date.now() - ts) / 1000)
+        setElapsed(secs)
+        if (secs >= 28800) setAlertFired(true) // already past 8h, don't re-fire
         setPhase('running')
+        fetch(`/api/time-entries?customer_id=${customer.id}`)
+          .then(r => r.json())
+          .then(data => {
+            const total = (data.time_entries || []).reduce((s, e) => s + (e.hours || 0), 0)
+            if (total > 0) setPriorHours(Math.round(total * 10) / 10)
+          })
+          .catch(() => {})
       }
     } catch {}
   }, [])
@@ -54,6 +79,22 @@ export default function Clock() {
     }
     return () => clearInterval(timerRef.current)
   }, [phase, startTs])
+
+  // 8-hour alert
+  useEffect(() => {
+    if (phase !== 'running' || elapsed < 28800 || alertFired) return
+    setAlertFired(true)
+    if ('Notification' in window) {
+      Notification.requestPermission().then(perm => {
+        if (perm === 'granted') {
+          new Notification("Still clocked in — 8 hours!", {
+            body: `You've been clocked in at ${selected?.name} for 8 hours. Don't forget to clock out.`,
+            icon: '/favicon.ico',
+          })
+        }
+      })
+    }
+  }, [elapsed, phase, alertFired, selected])
 
   async function loadAllCustomers() {
     if (allCustomers.length > 0) return
@@ -98,14 +139,37 @@ export default function Clock() {
   }
 
   function confirmCustomer(customer) {
-    const ts = Date.now()
     setSelected(customer)
-    setStartTs(ts)
-    setElapsed(0)
     setCandidates([])
     setShowAll(false)
+    setJobId('')
+    setWorkPurpose('')
+    setPhase('context')
+    // Fetch jobs for this customer
+    fetch(`/api/jobs?customer_id=${customer.id}`)
+      .then(r => r.json())
+      .then(data => setCustomerJobs(Array.isArray(data) ? data.filter(j => j.status !== 'estimate') : []))
+      .catch(() => setCustomerJobs([]))
+  }
+
+  function startClock() {
+    const customer = selected
+    const ts = Date.now()
+    setStartTs(ts)
+    setElapsed(0)
+    setAlertFired(false)
+    setPriorHours(null)
     setPhase('running')
-    localStorage.setItem(LS_KEY, JSON.stringify({ customer, startTs: ts }))
+    localStorage.setItem(LS_KEY, JSON.stringify({ customer, startTs: ts, jobId, workPurpose }))
+    // Fetch total hours previously logged to this customer
+    fetch(`/api/time-entries?customer_id=${customer.id}`)
+      .then(r => r.json())
+      .then(data => {
+        const entries = data.time_entries || []
+        const total = entries.reduce((s, e) => s + (e.hours || 0), 0)
+        if (total > 0) setPriorHours(Math.round(total * 10) / 10)
+      })
+      .catch(() => {})
   }
 
   function handleClockOut() {
@@ -125,11 +189,12 @@ export default function Clock() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           customer_id: selected.id,
+          job_id: jobId ? parseInt(jobId) : null,
           entry_date: startDate.toISOString().slice(0, 10),
           arrive_time: startDate.toTimeString().slice(0, 5),
           depart_time: endDate.toTimeString().slice(0, 5),
           hours: fmtHours(nowMs - startTs),
-          description,
+          description: description || (workPurpose ? WORK_PURPOSES.find(p => p.value === workPurpose)?.label : ''),
           source: 'clock',
         }),
       })
@@ -138,14 +203,19 @@ export default function Clock() {
       localStorage.removeItem(LS_KEY)
       setDescription('')
       setSavedDate(entryDate)
-      // Fetch customer mileage for trip suggestion
+      // Fetch customer mileage for trip suggestion (one-way)
       try {
         const cr = await fetch(`/api/customers/${selected.id}`)
         const cd = await cr.json()
         const oneway = cd.mileage_from_home || 0
-        setTripMiles(oneway > 0 ? String(Math.round(oneway * 2 * 10) / 10) : '')
+        const mi = Math.round(oneway * 10) / 10
+        setTripMiles(oneway > 0 ? String(mi) : '')
+        if (oneway > 0) {
+          setTripMinutes(String(Math.round((oneway / 30) * 60 / 5) * 5))
+        }
       } catch {
         setTripMiles('')
+        setTripMinutes('')
       }
       setPhase('trip')
     } catch {
@@ -168,6 +238,7 @@ export default function Clock() {
           destination: selected?.address || selected?.name,
           customer_id: selected?.id,
           miles: parseFloat(tripMiles),
+          drive_time_minutes: tripMinutes ? parseInt(tripMinutes) : null,
         }),
       })
     } catch {}
@@ -179,7 +250,11 @@ export default function Clock() {
     setSelected(null)
     setStartTs(null)
     setElapsed(0)
+    setJobId('')
+    setWorkPurpose('')
+    setCustomerJobs([])
     setTripMiles('')
+    setTripMinutes('')
     setTripSaving(false)
     setSavedDate('')
   }
@@ -191,6 +266,9 @@ export default function Clock() {
     setSelected(null)
     setStartTs(null)
     setElapsed(0)
+    setJobId('')
+    setWorkPurpose('')
+    setCustomerJobs([])
     setDescription('')
     setError('')
   }
@@ -299,18 +377,99 @@ export default function Clock() {
         </div>
       )}
 
+      {/* ── CONTEXT: job + purpose selection ── */}
+      {phase === 'context' && selected && (
+        <div className="pt-6 pb-8 space-y-5">
+          <div className="text-center mb-2">
+            <div className="font-bold text-xl text-slate-800">{selected.name}</div>
+            <div className="text-sm text-slate-400">What are you doing?</div>
+          </div>
+
+          {/* Purpose picker */}
+          <div className="space-y-2">
+            {WORK_PURPOSES.map(p => (
+              <button
+                key={p.value}
+                onClick={() => setWorkPurpose(p.value)}
+                className={`w-full text-left flex items-center gap-3 px-4 py-3 rounded-xl border-2 transition-all active:scale-95 ${
+                  workPurpose === p.value
+                    ? 'border-green-400 bg-green-50'
+                    : 'border-slate-200 bg-white hover:border-slate-300'
+                }`}
+              >
+                <span className="text-xl">{p.icon}</span>
+                <span className="font-medium text-slate-800">{p.label}</span>
+                {workPurpose === p.value && (
+                  <span className="ml-auto text-green-500 font-bold">✓</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Optional job link */}
+          {customerJobs.length > 0 && (
+            <div>
+              <label className="block text-sm font-medium text-slate-600 mb-1.5">Link to a job (optional)</label>
+              <select
+                value={jobId}
+                onChange={e => setJobId(e.target.value)}
+                className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">— No specific job —</option>
+                {customerJobs.map(j => (
+                  <option key={j.id} value={j.id}>
+                    {j.invoice_id || `#${j.id}`}{j.start_date ? ` (${j.start_date})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <button
+            onClick={startClock}
+            className="w-full bg-green-500 hover:bg-green-600 active:bg-green-700 text-white text-2xl font-bold py-6 rounded-2xl shadow-lg active:scale-95 transition-all"
+          >
+            START CLOCK
+          </button>
+          <button onClick={handleDiscard} className="w-full text-center py-2 text-sm text-slate-400 hover:text-slate-600">
+            Cancel
+          </button>
+        </div>
+      )}
+
       {/* ── RUNNING ── */}
       {phase === 'running' && selected && (
         <div className="text-center pt-10 pb-8">
+          {/* 8-hour warning banner */}
+          {elapsed >= 28800 && (
+            <div className="mb-6 bg-red-50 border border-red-300 rounded-2xl px-4 py-3 text-red-700 text-sm font-semibold animate-pulse">
+              ⚠️ You've been clocked in for {Math.floor(elapsed / 3600)}h — don't forget to clock out!
+            </div>
+          )}
+
           <div className="flex items-center justify-center gap-2 mb-3">
             <span className="w-2.5 h-2.5 bg-green-500 rounded-full animate-pulse inline-block" />
             <span className="text-sm font-semibold text-green-600 uppercase tracking-widest">Clocked In</span>
           </div>
           <h2 className="text-2xl font-bold text-slate-800">{selected.name}</h2>
-          {selected.address && (
-            <p className="text-sm text-slate-400 mt-1 mb-8 truncate">{selected.address}</p>
+          {workPurpose && (
+            <p className="text-sm text-green-600 mt-1 font-medium">
+              {WORK_PURPOSES.find(p => p.value === workPurpose)?.icon}{' '}
+              {WORK_PURPOSES.find(p => p.value === workPurpose)?.label}
+            </p>
           )}
-          {!selected.address && <div className="mb-8" />}
+          {!workPurpose && selected.address && (
+            <p className="text-sm text-slate-400 mt-1 truncate">{selected.address}</p>
+          )}
+
+          {/* Prior hours on this customer */}
+          {priorHours !== null && (
+            <p className="text-xs text-slate-400 mt-1 mb-6">
+              {priorHours}h already logged to this customer
+            </p>
+          )}
+          {priorHours === null && <div className="mb-8" />}
+
           <div className="text-7xl font-mono font-bold text-slate-800 tabular-nums tracking-tight mb-12">
             {fmtElapsed(elapsed)}
           </div>
@@ -342,16 +501,32 @@ export default function Clock() {
             <p className="text-sm text-slate-500 mt-1">to {selected?.name}</p>
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">Round-trip miles</label>
+            <label className="block text-sm font-medium text-slate-700 mb-2">One-way miles</label>
             <input
               type="number"
               inputMode="decimal"
               value={tripMiles}
-              onChange={e => setTripMiles(e.target.value)}
-              placeholder="e.g. 12.4"
+              onChange={e => {
+                const mi = parseFloat(e.target.value) || 0
+                setTripMiles(e.target.value)
+                setTripMinutes(mi > 0 ? String(Math.round((mi / 30) * 60 / 5) * 5) : '')
+              }}
+              placeholder="e.g. 6.2"
               className="w-full border border-slate-200 rounded-xl px-4 py-3 text-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-            {tripMiles && <p className="text-xs text-slate-400 mt-1 text-center">Based on saved customer distance</p>}
+            {tripMiles && <p className="text-xs text-slate-400 mt-1 text-center">From saved customer distance</p>}
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-2">Drive time (minutes)</label>
+            <input
+              type="number"
+              inputMode="numeric"
+              value={tripMinutes}
+              onChange={e => setTripMinutes(e.target.value)}
+              placeholder="auto-estimated"
+              className="w-full border border-slate-200 rounded-xl px-4 py-3 text-lg text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            {tripMinutes && <p className="text-xs text-slate-400 mt-1 text-center">Estimated at 30 mph avg</p>}
           </div>
           <button
             onClick={logTrip}

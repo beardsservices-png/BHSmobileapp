@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
-const API = 'http://localhost:5000/api'
+const API = '/api'
 
 const today = () => new Date().toISOString().slice(0, 10)
 
@@ -491,7 +491,14 @@ function TripCard({ trip, idx, customers, allJobs, onChange, onRemove }) {
             <div>
               <label className={labelCls}>One-way miles</label>
               <input type="number" min="0" step="0.1" placeholder="0"
-                value={trip.miles} onChange={e => set('miles', e.target.value)} className={inputCls} />
+                value={trip.miles}
+                onChange={e => {
+                  const mi = parseFloat(e.target.value) || 0
+                  const autoMins = mi > 0 ? String(Math.round((mi / 30) * 60 / 5) * 5) : ''
+                  set('miles', e.target.value)
+                  if (!trip.drive_time) set('drive_time', autoMins)
+                }}
+                className={inputCls} />
               {trip.miles && (
                 <p className="text-xs text-teal-600 mt-0.5">
                   IRS deduction: ${(parseFloat(trip.miles) * 0.70).toFixed(2)}
@@ -500,7 +507,7 @@ function TripCard({ trip, idx, customers, allJobs, onChange, onRemove }) {
             </div>
             <div>
               <label className={labelCls}>Drive time (min)</label>
-              <input type="number" min="0" step="1" placeholder="0"
+              <input type="number" min="0" step="5" placeholder="estimated"
                 value={trip.drive_time} onChange={e => set('drive_time', e.target.value)} className={inputCls} />
             </div>
           </div>
@@ -519,16 +526,55 @@ function TripCard({ trip, idx, customers, allJobs, onChange, onRemove }) {
 // ─── Expense card ──────────────────────────────────────────────────────────────
 function ExpenseCard({ exp, idx, customers, allJobs, onChange, onRemove }) {
   const custJobs = allJobs.filter(j => String(j.customer_id) === String(exp.customer_id))
+  const fileRef = useRef(null)
   function set(f, v) { onChange({ ...exp, [f]: v }) }
   const inputCls = "w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
   const labelCls = "text-xs font-medium text-slate-500 mb-0.5 block"
+
+  function handlePhoto(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = evt => set('receipt_photo', evt.target.result)
+    reader.readAsDataURL(file)
+  }
 
   return (
     <div className="border-2 border-orange-100 rounded-xl p-5 bg-white shadow-sm space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="font-bold text-orange-700 text-base">Expense #{idx + 1}</h3>
-        <button onClick={onRemove} className="text-xs text-red-400 hover:text-red-600">Remove</button>
+        <div className="flex items-center gap-3">
+          {/* Camera / receipt button */}
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg border transition-colors ${
+              exp.receipt_photo ? 'border-green-400 text-green-700 bg-green-50' : 'border-slate-300 text-slate-500 hover:border-orange-400 hover:text-orange-600'
+            }`}
+            title="Take or attach a receipt photo"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+            {exp.receipt_photo ? 'Receipt ✓' : 'Receipt'}
+          </button>
+          <input ref={fileRef} type="file" accept="image/*" capture="environment"
+            className="hidden" onChange={handlePhoto} />
+          <button onClick={onRemove} className="text-xs text-red-400 hover:text-red-600">Remove</button>
+        </div>
       </div>
+
+      {/* Receipt photo preview */}
+      {exp.receipt_photo && (
+        <div className="relative">
+          <img src={exp.receipt_photo} alt="Receipt" className="w-full max-h-40 object-contain rounded-lg border border-green-200" />
+          <button onClick={() => set('receipt_photo', null)}
+            className="absolute top-1 right-1 bg-white border border-red-200 rounded-full w-5 h-5 flex items-center justify-center text-red-400 hover:text-red-600 text-xs">
+            ×
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <div>
@@ -612,6 +658,7 @@ export default function DayWrapup() {
   const [date, setDate]       = useState(today())
   const [jobs, setJobs]       = useState([makeJob()])
   const [trips, setTrips]     = useState([])
+  const [existingTrips, setExistingTrips] = useState([])  // trips already in DB for this date
   const [expenses, setExpenses] = useState([])
   const [customers, setCustomers] = useState([])
   const [allJobs, setAllJobs]   = useState([])
@@ -625,10 +672,19 @@ export default function DayWrapup() {
       fetch(`${API}/customers`).then(r => r.json()),
       fetch(`${API}/jobs`).then(r => r.json()),
     ]).then(([custs, jbs]) => {
-      setCustomers(custs)
-      setAllJobs(jbs)
+      // API already returns customers sorted by most recent job date
+      setCustomers(Array.isArray(custs) ? custs.filter(c => !c.name.startsWith('_')) : [])
+      setAllJobs(Array.isArray(jbs) ? jbs : [])
     }).catch(() => {})
   }, [])
+
+  // Fetch already-logged trips whenever the date changes
+  useEffect(() => {
+    fetch(`${API}/trips?start=${date}&end=${date}`)
+      .then(r => r.json())
+      .then(data => setExistingTrips(Array.isArray(data) ? data : []))
+      .catch(() => setExistingTrips([]))
+  }, [date])
 
   function updateJob(idx, val) { setJobs(jobs.map((j, i) => i === idx ? val : j)) }
   function addJob() { setJobs([...jobs, makeJob()]) }
@@ -877,7 +933,27 @@ export default function DayWrapup() {
               Don't log trips already covered in the job cards above.
             </p>
           </div>
-          {trips.length === 0 && (
+
+          {/* Already-logged trips for this date */}
+          {existingTrips.length > 0 && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Already logged for {date}</p>
+              <div className="space-y-1.5">
+                {existingTrips.map(t => (
+                  <div key={t.id} className="flex items-center gap-2 text-xs text-slate-600">
+                    <span className="w-1.5 h-1.5 rounded-full bg-teal-400 flex-shrink-0" />
+                    <span className="font-medium">{t.destination || '(no destination)'}</span>
+                    {t.miles && <span className="text-slate-400">· {t.miles} mi</span>}
+                    {t.drive_time_minutes && <span className="text-slate-400">· {t.drive_time_minutes} min</span>}
+                    {t.customer_name && <span className="text-slate-400">· {t.customer_name}</span>}
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-slate-400 mt-2">These are already saved — only add new ones below.</p>
+            </div>
+          )}
+
+          {trips.length === 0 && existingTrips.length === 0 && (
             <div className="text-center text-slate-400 text-sm py-4">No other trips — tap + to add one.</div>
           )}
           {trips.map((t, i) => (

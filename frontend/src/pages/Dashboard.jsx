@@ -93,7 +93,10 @@ export default function Dashboard() {
   const [stats, setStats]       = useState(null)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
-  const [activePreset, setActivePreset] = useState('all')
+  const [activePreset, setActivePreset] = useState('month')
+  const [insights, setInsights]         = useState(null)
+  const [insightsLoading, setInsightsLoading] = useState(false)
+  const [insightsError, setInsightsError]     = useState(null)
   const [customStart, setCustomStart]   = useState('')
   const [customEnd, setCustomEnd]       = useState('')
 
@@ -108,7 +111,8 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    fetchDashboard(null, null)
+    const range = getRange('month')
+    fetchDashboard(range.start, range.end)
   }, [fetchDashboard])
 
   function handlePreset(preset) {
@@ -126,11 +130,27 @@ export default function Dashboard() {
     }
   }
 
+  async function loadInsights(force = false) {
+    setInsightsLoading(true)
+    setInsightsError(null)
+    try {
+      const r = await fetch(`/api/insights${force ? '?force=1' : ''}`)
+      const data = await r.json()
+      if (data.available === false) {
+        setInsightsError(data.error || 'Claude API not available')
+      } else {
+        setInsights(data)
+      }
+    } catch (e) {
+      setInsightsError('Failed to load insights')
+    } finally {
+      setInsightsLoading(false)
+    }
+  }
+
   const rangeLabel = getRangeLabel(activePreset, customStart, customEnd)
 
   const useMonthChart = activePreset !== 'all' && stats?.revenue_by_month?.length > 0
-  const chartData = useMonthChart ? stats.revenue_by_month : stats?.revenue_by_year
-  const chartKey  = useMonthChart ? 'month' : 'year'
 
   if (error) return (
     <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-red-700">Error: {error}</div>
@@ -209,7 +229,7 @@ export default function Dashboard() {
         <>
           {/* Primary KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard label="Labor Revenue"  value={fmt(stats?.total_labor)}     color="green" />
+            <StatCard label="Profit"         value={fmt(stats?.total_profit)}     color="green" />
             <StatCard label="Avg $/Hour"     value={fmtD(stats?.avg_hourly_rate)} color="blue"  />
             <StatCard label="Hours Tracked"  value={fmtH(stats?.total_hours)}    color="purple"/>
             <StatCard label="Avg Days / Job" value={`${stats?.avg_days_per_job || 0} days`} color="amber" />
@@ -217,10 +237,10 @@ export default function Dashboard() {
 
           {/* Secondary counters */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard label="Customers"     value={stats?.customer_count || 0}  small />
-            <StatCard label="Jobs"          value={stats?.job_count || 0}        small />
-            <StatCard label="Invoices"      value={stats?.invoice_count || 0}    small />
-            <StatCard label="Materials"     value={fmt(stats?.total_materials)}  small />
+            <StatCard label="Revenue"   value={fmt(stats?.total_revenue)}  small />
+            <StatCard label="Expenses"  value={fmt(stats?.total_expenses)} small />
+            <StatCard label="Jobs"      value={stats?.job_count || 0}      small />
+            <StatCard label="Customers" value={stats?.customer_count || 0} small />
           </div>
 
           {/* Estimation accuracy banner */}
@@ -252,16 +272,14 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Revenue chart — monthly when filtered, yearly for all time */}
-          {chartData?.length > 0 && (
+          {/* Revenue chart — monthly data only (no "revenue by year" chart) */}
+          {useMonthChart && stats.revenue_by_month.length > 0 && (
             <div className="bg-white rounded-xl border border-gray-200 p-6">
-              <h2 className="text-base font-semibold text-gray-800 mb-4">
-                {useMonthChart ? 'Revenue by Month' : 'Revenue by Year'}
-              </h2>
+              <h2 className="text-base font-semibold text-gray-800 mb-4">Revenue by Month</h2>
               <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={chartData} barGap={4}>
+                <BarChart data={stats.revenue_by_month} barGap={4}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                  <XAxis dataKey={chartKey} tick={{ fontSize: 12 }} />
+                  <XAxis dataKey="month" tick={{ fontSize: 12 }} />
                   <YAxis tickFormatter={v => `$${(v/1000).toFixed(0)}k`} tick={{ fontSize: 11 }} />
                   <Tooltip formatter={v => fmtD(v)} />
                   <Bar dataKey="total_labor"     name="Labor"     fill="#22c55e" radius={[4,4,0,0]} />
@@ -334,40 +352,95 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* Revenue by service category */}
-          {stats?.revenue_by_category?.length > 0 && (
-            <div className="bg-white rounded-xl border border-gray-200">
-              <div className="px-5 py-4 border-b border-gray-100">
-                <h2 className="text-base font-semibold text-gray-800">Revenue by Service Type</h2>
+          {/* Business Health Panel */}
+          {stats && (
+            <BusinessHealth stats={stats} rangeLabel={rangeLabel} />
+          )}
+
+          {/* ── Business Insights ──────────────────────────────────────── */}
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+              <div>
+                <h2 className="text-base font-semibold text-gray-800">Business Insights</h2>
+                <p className="text-xs text-gray-400 mt-0.5">AI analysis of your last 24 months of data</p>
               </div>
-              <div className="divide-y divide-gray-50">
-                {stats.revenue_by_category.map(cat => {
-                  const pct = stats.total_labor > 0
-                    ? Math.round((cat.total_revenue / stats.total_labor) * 100)
-                    : 0
-                  return (
-                    <div key={cat.category} className="px-5 py-3 flex items-center gap-4">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-sm text-gray-800 truncate">{cat.category}</span>
-                          <div className="flex items-center gap-3 flex-shrink-0 ml-3 text-xs text-gray-500">
-                            <span>{cat.job_count} job{cat.job_count !== 1 ? 's' : ''}</span>
-                            <span className="font-semibold text-gray-900">{fmt(cat.total_revenue)}</span>
-                          </div>
-                        </div>
-                        <div className="w-full bg-gray-100 rounded-full h-1.5">
-                          <div
-                            className="bg-blue-500 h-1.5 rounded-full"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )
-                })}
+              <div className="flex gap-2">
+                {insights && (
+                  <button
+                    onClick={() => loadInsights(true)}
+                    disabled={insightsLoading}
+                    className="text-xs text-gray-500 hover:text-gray-700 px-3 py-1.5 rounded-lg hover:bg-gray-100 disabled:opacity-40"
+                  >
+                    Refresh
+                  </button>
+                )}
+                {!insights && (
+                  <button
+                    onClick={() => loadInsights(false)}
+                    disabled={insightsLoading}
+                    className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                  >
+                    {insightsLoading ? (
+                      <>
+                        <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>&#10024; Get Insights</>
+                    )}
+                  </button>
+                )}
               </div>
             </div>
-          )}
+
+            {!insights && !insightsLoading && !insightsError && (
+              <div className="px-5 py-10 text-center text-gray-400">
+                <div className="text-3xl mb-2">&#128200;</div>
+                <div className="text-sm font-medium text-gray-500 mb-1">Ready to analyze your business</div>
+                <div className="text-xs text-gray-400">Looks at seasonal trends, pricing gaps, slow seasons, and repeat customer opportunities</div>
+              </div>
+            )}
+
+            {insightsLoading && (
+              <div className="px-5 py-10 text-center text-gray-400">
+                <div className="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+                <div className="text-sm text-gray-500">Reading 24 months of your data...</div>
+              </div>
+            )}
+
+            {insightsError && (
+              <div className="px-5 py-6 text-center">
+                <div className="text-sm text-red-600 mb-2">{insightsError}</div>
+                {insightsError.includes('ANTHROPIC_API_KEY') && (
+                  <div className="text-xs text-gray-400">Set the ANTHROPIC_API_KEY environment variable to enable this feature.</div>
+                )}
+              </div>
+            )}
+
+            {insights?.insights && (
+              <>
+                {insights.summary && (
+                  <div className="flex gap-6 px-5 py-3 bg-indigo-50 border-b border-indigo-100 text-xs text-indigo-700">
+                    <span><strong>{insights.summary.jobs}</strong> jobs analyzed</span>
+                    <span>Revenue <strong>{fmt(insights.summary.revenue)}</strong></span>
+                    <span>Profit <strong>{fmt(insights.summary.profit)}</strong></span>
+                    {insights.summary.busiest?.length > 0 && (
+                      <span>Busiest: <strong>{insights.summary.busiest.join(', ')}</strong></span>
+                    )}
+                  </div>
+                )}
+                <div className="divide-y divide-gray-50">
+                  {insights.insights.map((ins, i) => (
+                    <InsightCard key={i} insight={ins} />
+                  ))}
+                </div>
+                <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 text-xs text-gray-400 text-right">
+                  Generated by Claude · cached 1 hour ·{' '}
+                  <button onClick={() => loadInsights(true)} className="underline hover:text-gray-600">regenerate</button>
+                </div>
+              </>
+            )}
+          </div>
         </>
       )}
     </div>
@@ -401,5 +474,174 @@ function StatusBadge({ status }) {
     <span className={`text-xs px-2 py-0.5 rounded-full font-medium mt-0.5 inline-block ${map[status] || 'bg-gray-100 text-gray-600'}`}>
       {status}
     </span>
+  )
+}
+
+function BusinessHealth({ stats, rangeLabel }) {
+  const revenue = stats.total_revenue || 0
+  const expenses = stats.total_expenses || 0
+  const profit = stats.total_profit || 0
+  const jobs = stats.job_count || 0
+  const hours = stats.total_hours || 0
+  const rate = stats.avg_hourly_rate || 0
+
+  const profitPct = revenue > 0 ? Math.round((profit / revenue) * 100) : null
+  const expensePct = revenue > 0 ? Math.round((expenses / revenue) * 100) : null
+  const revenuePerJob = jobs > 0 ? revenue / jobs : null
+  const profitPerJob = jobs > 0 ? profit / jobs : null
+  const TARGET_RATE = 50
+
+  // Profit margin color
+  const marginColor = profitPct === null ? 'text-gray-400'
+    : profitPct >= 60 ? 'text-green-600'
+    : profitPct >= 40 ? 'text-yellow-600'
+    : 'text-red-600'
+
+  // Rate vs target
+  const rateColor = rate >= TARGET_RATE ? 'text-green-600' : rate > 0 ? 'text-red-600' : 'text-gray-400'
+
+  if (revenue === 0) return null
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200">
+      <div className="px-5 py-4 border-b border-gray-100">
+        <h2 className="text-base font-semibold text-gray-800">Business Health</h2>
+        {rangeLabel && <p className="text-xs text-gray-400 mt-0.5">{rangeLabel}</p>}
+      </div>
+      <div className="p-5 space-y-4">
+
+        {/* Margin + rate row */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="bg-gray-50 rounded-xl p-4 text-center">
+            <div className={`text-2xl font-bold ${marginColor}`}>
+              {profitPct !== null ? `${profitPct}%` : '—'}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">Profit Margin</div>
+            {profitPct !== null && profitPct < 40 && (
+              <div className="text-xs text-red-500 mt-1">Below target (40%)</div>
+            )}
+          </div>
+          <div className="bg-gray-50 rounded-xl p-4 text-center">
+            <div className={`text-2xl font-bold ${rateColor}`}>
+              {rate > 0 ? `$${Math.round(rate)}` : '—'}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">Hourly Rate</div>
+            {rate > 0 && rate < TARGET_RATE && (
+              <div className="text-xs text-red-500 mt-1">Below ${TARGET_RATE}/hr target</div>
+            )}
+          </div>
+          <div className="bg-gray-50 rounded-xl p-4 text-center">
+            <div className="text-2xl font-bold text-gray-800">
+              {expensePct !== null ? `${expensePct}%` : '—'}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">Expense Ratio</div>
+            {expensePct !== null && expensePct > 30 && (
+              <div className="text-xs text-amber-600 mt-1">High — review costs</div>
+            )}
+          </div>
+          <div className="bg-gray-50 rounded-xl p-4 text-center">
+            <div className="text-2xl font-bold text-gray-800">
+              {revenuePerJob !== null ? fmt(revenuePerJob) : '—'}
+            </div>
+            <div className="text-xs text-gray-500 mt-1">Revenue / Job</div>
+          </div>
+        </div>
+
+        {/* Service breakdown — jobs + revenue per type, sorted by revenue */}
+        {stats.revenue_by_category?.length > 0 && (
+          <div>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Revenue by Service</h3>
+            <div className="space-y-2">
+              {stats.revenue_by_category.slice(0, 6).map(cat => {
+                const pct = revenue > 0 ? (cat.total_revenue / revenue) * 100 : 0
+                const avgPerJob = cat.job_count > 0 ? cat.total_revenue / cat.job_count : 0
+                return (
+                  <div key={cat.category}>
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="text-gray-700 truncate flex-1 mr-2">{cat.category}</span>
+                      <div className="flex items-center gap-3 text-gray-500 flex-shrink-0">
+                        <span>{cat.job_count} job{cat.job_count !== 1 ? 's' : ''}</span>
+                        <span className="text-gray-400">{fmt(avgPerJob)}/job</span>
+                        <span className="font-semibold text-gray-800 w-16 text-right">{fmt(cat.total_revenue)}</span>
+                      </div>
+                    </div>
+                    <div className="w-full bg-gray-100 rounded-full h-1.5">
+                      <div className="bg-green-500 h-1.5 rounded-full" style={{ width: `${Math.min(pct, 100)}%` }} />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Actionable flags */}
+        {(profitPct !== null && profitPct < 40) || (rate > 0 && rate < TARGET_RATE) || (expensePct !== null && expensePct > 30) ? (
+          <div className="border-t border-gray-100 pt-4">
+            <h3 className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-2">Things to watch</h3>
+            <div className="space-y-1.5">
+              {rate > 0 && rate < TARGET_RATE && (
+                <div className="flex items-start gap-2 text-xs text-gray-600">
+                  <span className="text-red-500 mt-0.5">&#8599;</span>
+                  <span>Your effective rate is <strong>${Math.round(rate)}/hr</strong> — raise prices or reduce low-value jobs to hit ${TARGET_RATE}/hr.</span>
+                </div>
+              )}
+              {profitPct !== null && profitPct < 40 && (
+                <div className="flex items-start gap-2 text-xs text-gray-600">
+                  <span className="text-amber-500 mt-0.5">&#8599;</span>
+                  <span>Profit margin is <strong>{profitPct}%</strong> — check expenses in the Expenses page for anything to cut.</span>
+                </div>
+              )}
+              {expensePct !== null && expensePct > 30 && (
+                <div className="flex items-start gap-2 text-xs text-gray-600">
+                  <span className="text-amber-500 mt-0.5">&#8599;</span>
+                  <span>Expenses are <strong>{expensePct}%</strong> of revenue this period — review materials and supply runs.</span>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
+
+      </div>
+    </div>
+  )
+}
+
+function InsightCard({ insight }) {
+  const typeStyles = {
+    seasonal:   { badge: 'bg-blue-100 text-blue-700',   icon: '&#127793;' },
+    pricing:    { badge: 'bg-green-100 text-green-700',  icon: '&#128176;' },
+    marketing:  { badge: 'bg-purple-100 text-purple-700',icon: '&#128227;' },
+    focus:      { badge: 'bg-amber-100 text-amber-700',  icon: '&#127919;' },
+    efficiency: { badge: 'bg-teal-100 text-teal-700',    icon: '&#9889;'   },
+    warning:    { badge: 'bg-red-100 text-red-700',      icon: '&#9888;'   },
+  }
+  const priority = {
+    high:   'bg-red-500',
+    medium: 'bg-yellow-400',
+    low:    'bg-gray-300',
+  }
+  const style = typeStyles[insight.type] || typeStyles.focus
+
+  return (
+    <div className="px-5 py-4">
+      <div className="flex items-start gap-3">
+        <span className="text-xl mt-0.5 shrink-0" dangerouslySetInnerHTML={{ __html: style.icon }} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${style.badge}`}>
+              {insight.type}
+            </span>
+            <span className={`w-2 h-2 rounded-full shrink-0 ${priority[insight.priority] || priority.low}`} title={`${insight.priority} priority`} />
+            <h3 className="text-sm font-semibold text-gray-900">{insight.title}</h3>
+          </div>
+          <p className="text-sm text-gray-600 mb-2">{insight.insight}</p>
+          <div className="flex items-start gap-2 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">
+            <span className="text-indigo-500 font-bold text-xs shrink-0 mt-0.5">ACTION</span>
+            <p className="text-xs text-indigo-800">{insight.action}</p>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
