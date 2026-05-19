@@ -1478,36 +1478,86 @@ def add_time_entry():
 
 
 @app.route('/api/time-entries/<int:te_id>', methods=['PUT'])
-def reassign_time_entry(te_id):
-    """Move a time entry to a different job (or unassign it)."""
+def update_time_entry(te_id):
+    """Edit a time entry — hours, times, date, description, or reassign job."""
     data = request.json
-    if not data or 'job_id' not in data:
-        return jsonify({'error': 'job_id is required'}), 400
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
 
     conn = get_db()
     cursor = conn.cursor()
 
-    te = cursor.execute('SELECT id, customer_id FROM time_entries WHERE id = ?', (te_id,)).fetchone()
+    te = cursor.execute('SELECT * FROM time_entries WHERE id = ?', (te_id,)).fetchone()
     if not te:
         conn.close()
         return jsonify({'error': 'Time entry not found'}), 404
 
-    new_job_id = data['job_id']
-    if new_job_id:
-        job = cursor.execute('SELECT id, customer_id FROM jobs WHERE id = ?', (new_job_id,)).fetchone()
-        if not job:
-            conn.close()
-            return jsonify({'error': 'Target job not found'}), 404
-        cursor.execute(
-            'UPDATE time_entries SET job_id = ?, customer_id = ? WHERE id = ?',
-            (new_job_id, job['customer_id'], te_id)
-        )
-    else:
-        cursor.execute('UPDATE time_entries SET job_id = NULL WHERE id = ?', (te_id,))
+    fields = []
+    params = []
 
+    if 'hours' in data:
+        fields.append('hours = ?')
+        params.append(float(data['hours']))
+    if 'entry_date' in data:
+        fields.append('entry_date = ?')
+        params.append(data['entry_date'])
+    if 'arrive_time' in data:
+        fields.append('start_time = ?')
+        params.append(data['arrive_time'])
+    if 'depart_time' in data:
+        fields.append('end_time = ?')
+        params.append(data['depart_time'])
+    if 'description' in data:
+        fields.append('description = ?')
+        params.append(data['description'])
+    if 'cost_code' in data:
+        fields.append('cost_code = ?')
+        params.append(data['cost_code'])
+    if 'job_id' in data:
+        new_job_id = data['job_id']
+        if new_job_id:
+            job = cursor.execute('SELECT id, customer_id FROM jobs WHERE id = ?', (new_job_id,)).fetchone()
+            if not job:
+                conn.close()
+                return jsonify({'error': 'Target job not found'}), 404
+            fields.append('job_id = ?')
+            params.append(new_job_id)
+            fields.append('customer_id = ?')
+            params.append(job['customer_id'])
+        else:
+            fields.append('job_id = NULL')
+
+    if not fields:
+        conn.close()
+        return jsonify({'error': 'No valid fields to update'}), 400
+
+    params.append(te_id)
+    cursor.execute(f'UPDATE time_entries SET {", ".join(fields)} WHERE id = ?', params)
+    conn.commit()
+
+    updated = cursor.execute('''
+        SELECT te.*, c.name as customer_name, j.invoice_id
+        FROM time_entries te
+        LEFT JOIN customers c ON te.customer_id = c.id
+        LEFT JOIN jobs j ON te.job_id = j.id
+        WHERE te.id = ?
+    ''', (te_id,)).fetchone()
+    conn.close()
+    return jsonify(dict(updated))
+
+
+@app.route('/api/time-entries/<int:te_id>', methods=['DELETE'])
+def delete_time_entry(te_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    te = cursor.execute('SELECT id FROM time_entries WHERE id = ?', (te_id,)).fetchone()
+    if not te:
+        conn.close()
+        return jsonify({'error': 'Time entry not found'}), 404
+    cursor.execute('DELETE FROM time_entries WHERE id = ?', (te_id,))
     conn.commit()
     conn.close()
-    return jsonify({'id': te_id, 'job_id': new_job_id, 'message': 'Reassigned'})
+    return jsonify({'message': 'Deleted'})
 
 
 # ============================================================

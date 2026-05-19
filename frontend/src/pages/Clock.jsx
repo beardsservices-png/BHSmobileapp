@@ -40,8 +40,10 @@ export default function Clock() {
   const [tripMinutes, setTripMinutes] = useState('')
   const [tripSaving, setTripSaving] = useState(false)
   const [savedDate, setSavedDate] = useState('')
-  const [priorHours, setPriorHours] = useState(null) // hours already logged to this customer
+  const [priorHours, setPriorHours] = useState(null)
   const [alertFired, setAlertFired] = useState(false)
+  const [endDate, setEndDate] = useState('')
+  const [endTime, setEndTime] = useState('')
   const timerRef = useRef(null)
 
   // Restore active session from localStorage
@@ -174,15 +176,32 @@ export default function Clock() {
 
   function handleClockOut() {
     clearInterval(timerRef.current)
+    const now = new Date()
+    setEndDate(now.toISOString().slice(0, 10))
+    setEndTime(now.toTimeString().slice(0, 5))
     setPhase('wrapping')
   }
 
   async function handleSave() {
     setSaving(true)
     setError('')
-    const nowMs = Date.now()
     const startDate = new Date(startTs)
-    const endDate = new Date(nowMs)
+
+    // Build end datetime from editable fields (user may have corrected it)
+    let endMs
+    if (endDate && endTime) {
+      endMs = new Date(`${endDate}T${endTime}:00`).getTime()
+    } else {
+      endMs = Date.now()
+    }
+
+    if (endMs <= startTs) {
+      setError('End time must be after start time. Check the times and try again.')
+      setSaving(false)
+      return
+    }
+
+    const hours = fmtHours(endMs - startTs)
     try {
       const res = await fetch('/api/time-entries', {
         method: 'POST',
@@ -192,8 +211,8 @@ export default function Clock() {
           job_id: jobId ? parseInt(jobId) : null,
           entry_date: startDate.toISOString().slice(0, 10),
           arrive_time: startDate.toTimeString().slice(0, 5),
-          depart_time: endDate.toTimeString().slice(0, 5),
-          hours: fmtHours(nowMs - startTs),
+          depart_time: endTime || new Date(endMs).toTimeString().slice(0, 5),
+          hours,
           description: description || (workPurpose ? WORK_PURPOSES.find(p => p.value === workPurpose)?.label : ''),
           source: 'clock',
         }),
@@ -543,7 +562,7 @@ export default function Clock() {
 
       {/* ── WRAPPING UP ── */}
       {phase === 'wrapping' && (
-        <div className="pt-8 pb-8 space-y-6">
+        <div className="pt-8 pb-8 space-y-5">
           <div className="text-center">
             <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mx-auto mb-4">
               <svg className="w-8 h-8 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -551,8 +570,54 @@ export default function Clock() {
               </svg>
             </div>
             <h2 className="text-2xl font-bold text-slate-800">Nice work!</h2>
-            <div className="text-5xl font-mono font-bold text-slate-700 mt-3">{fmtElapsed(elapsed)}</div>
             <div className="text-slate-500 mt-1">{selected?.name}</div>
+          </div>
+
+          {/* Time correction section */}
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Correct the times if needed</p>
+            <div className="flex items-center gap-3">
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-slate-600 mb-1">Started</label>
+                <div className="bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-sm text-slate-500 font-mono">
+                  {startTs ? new Date(startTs).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5 text-center">
+                  {startTs ? new Date(startTs).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : ''}
+                </div>
+              </div>
+              <div className="text-slate-300 text-lg pt-2">→</div>
+              <div className="flex-1">
+                <label className="block text-xs font-medium text-slate-600 mb-1">Finished</label>
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={e => setEndTime(e.target.value)}
+                  className="w-full bg-white border border-blue-300 rounded-xl px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={e => setEndDate(e.target.value)}
+                  className="w-full mt-1 bg-white border border-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+            {/* Live corrected duration */}
+            {endDate && endTime && startTs && (() => {
+              const ms = new Date(`${endDate}T${endTime}:00`).getTime() - startTs
+              if (ms <= 0) return <p className="text-xs text-red-500 text-center">End time is before start — please fix</p>
+              const h = Math.floor(ms / 3600000)
+              const m = Math.floor((ms % 3600000) / 60000)
+              return (
+                <div className="text-center bg-white border border-green-200 rounded-xl py-2">
+                  <span className="text-2xl font-mono font-bold text-slate-800">
+                    {h}h {m > 0 ? `${m}m` : ''}
+                  </span>
+                  <span className="text-xs text-slate-400 ml-2">total</span>
+                </div>
+              )
+            })()}
           </div>
 
           <div>
@@ -565,7 +630,6 @@ export default function Clock() {
               onChange={e => setDescription(e.target.value)}
               placeholder="e.g. Replaced bathroom faucet, patched drywall..."
               className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-              autoFocus
             />
           </div>
 
