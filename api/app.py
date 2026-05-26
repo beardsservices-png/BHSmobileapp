@@ -14,9 +14,30 @@ import json
 from datetime import datetime
 import math
 import time as _time
+import io
+import base64
 
-BRIAN_HOME_LAT = 36.3345   # Mountain Home, AR
-BRIAN_HOME_LON = -92.3857
+BRIAN_HOME_ADDRESS = os.environ.get('BRIAN_HOME_ADDRESS', '360 County Road 35, Clarkridge, AR 72623')
+BRIAN_HOME_LAT = 36.46519470   # 360 County Rd 35, Clarkridge AR 72623
+BRIAN_HOME_LON = -92.31659698
+
+
+def _init_home_coords():
+    global BRIAN_HOME_LAT, BRIAN_HOME_LON
+    try:
+        encoded = urllib.parse.quote(BRIAN_HOME_ADDRESS + ', USA')
+        url = f'https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1'
+        req = urllib.request.Request(url, headers={'User-Agent': 'BeardHomeServices/1.0'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            geo = json.loads(resp.read())
+        if geo:
+            BRIAN_HOME_LAT = float(geo[0]['lat'])
+            BRIAN_HOME_LON = float(geo[0]['lon'])
+    except Exception:
+        pass
+
+
+_init_home_coords()
 
 app = Flask(__name__)
 CORS(app)
@@ -506,6 +527,40 @@ def update_customer(customer_id):
     return jsonify({'id': customer_id, 'message': 'Customer updated'})
 
 
+@app.route('/api/customers/<int:customer_id>', methods=['DELETE'])
+def delete_customer(customer_id):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT name FROM customers WHERE id = ?', (customer_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Customer not found'}), 404
+
+    cursor.execute('SELECT COUNT(*) as cnt FROM jobs WHERE customer_id = ?', (customer_id,))
+    job_count = cursor.fetchone()['cnt']
+
+    force = request.args.get('force') == '1'
+    if job_count > 0 and not force:
+        conn.close()
+        return jsonify({'error': f'Customer has {job_count} job(s). Confirm to delete everything.', 'job_count': job_count}), 409
+
+    cursor.execute('SELECT id FROM jobs WHERE customer_id = ?', (customer_id,))
+    job_ids = [r['id'] for r in cursor.fetchall()]
+    for jid in job_ids:
+        cursor.execute('DELETE FROM services_performed WHERE job_id = ?', (jid,))
+        cursor.execute('DELETE FROM payments WHERE job_id = ?', (jid,))
+        cursor.execute('DELETE FROM trips WHERE job_id = ?', (jid,))
+        cursor.execute('DELETE FROM invoices WHERE job_id = ?', (jid,))
+    cursor.execute('DELETE FROM time_entries WHERE customer_id = ?', (customer_id,))
+    cursor.execute('DELETE FROM jobs WHERE customer_id = ?', (customer_id,))
+    cursor.execute('DELETE FROM customers WHERE id = ?', (customer_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Customer deleted', 'jobs_removed': len(job_ids)})
+
+
 @app.route('/api/customers/<int:customer_id>/calculate-mileage', methods=['POST'])
 def calculate_customer_mileage(customer_id):
     """Geocode the customer address and calculate driving distance from Brian's home."""
@@ -783,6 +838,25 @@ def trash_estimate(job_id):
     conn.commit()
     conn.close()
     return jsonify({'message': 'Estimate trashed', 'job_id': job_id})
+
+
+@app.route('/api/jobs/<int:job_id>', methods=['DELETE'])
+def delete_job(job_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM jobs WHERE id = ?', (job_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Job not found'}), 404
+    cursor.execute('DELETE FROM services_performed WHERE job_id = ?', (job_id,))
+    cursor.execute('DELETE FROM payments WHERE job_id = ?', (job_id,))
+    cursor.execute('DELETE FROM trips WHERE job_id = ?', (job_id,))
+    cursor.execute('DELETE FROM invoices WHERE job_id = ?', (job_id,))
+    cursor.execute('UPDATE time_entries SET job_id = NULL WHERE job_id = ?', (job_id,))
+    cursor.execute('DELETE FROM jobs WHERE id = ?', (job_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Job deleted'})
 
 
 @app.route('/api/estimates')
@@ -3185,6 +3259,146 @@ def backup_db():
         return jsonify({'error': 'unauthorized'}), 401
     return send_file(DB_PATH, as_attachment=True, download_name='beard_business.db',
                      mimetype='application/x-sqlite3')
+
+
+# ============================================================
+# PDF INVOICE IMPORT
+# ============================================================
+
+@app.route('/api/invoice/parse-pdf', methods=['POST'])
+def parse_invoice_pdf():
+    """Upload a PDF invoice, extract text with pdfplumber, parse with Claude."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    if not f.filename.lower().endswith('.pdf'):
+        return jsonify({'error': 'File must be a PDF'}), 400
+
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not configured'}), 500
+
+    try:
+        import pdfplumber
+        pdf_bytes = f.read()
+        text = ''
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text += (page.extract_text() or '') + '\n'
+
+        if not text.strip():
+            return jsonify({'error': 'Could not extract text from this PDF'}), 422
+
+        prompt = f"""Extract invoice data from this text and return ONLY valid JSON with these fields:
+- customer_name (string)
+- customer_address (string or null)
+- customer_phone (string or null)
+- invoice_number (string or null)
+- invoice_date (YYYY-MM-DD or null)
+- services (array of: description string, amount number, service_type 'labor' or 'materials')
+- total_labor (number)
+- total_materials (number)
+- notes (string or null)
+
+Invoice text:
+{text[:4000]}
+
+Return ONLY valid JSON."""
+
+        req_data = json.dumps({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 1200,
+            'messages': [{'role': 'user', 'content': prompt}]
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=req_data,
+            headers={
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            result = json.loads(resp.read())
+        raw = result['content'][0]['text'].strip()
+        if raw.startswith('```'):
+            raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        parsed = json.loads(raw)
+        parsed['raw_text_preview'] = text[:600]
+        return jsonify(parsed)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# MAPS SCREENSHOT IMPORT
+# ============================================================
+
+@app.route('/api/maps-screenshot/parse', methods=['POST'])
+def parse_maps_screenshot():
+    """Upload a Google Maps / Google Photos screenshot, parse visit info with Claude Vision."""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    ext = os.path.splitext(f.filename.lower())[1]
+    media_map = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                 '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif'}
+    if ext not in media_map:
+        return jsonify({'error': 'File must be an image (jpg/png/webp)'}), 400
+
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not configured'}), 500
+
+    try:
+        img_bytes = f.read()
+        img_b64 = base64.b64encode(img_bytes).decode()
+        media_type = media_map[ext]
+
+        req_data = json.dumps({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 700,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image',
+                        'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64}
+                    },
+                    {
+                        'type': 'text',
+                        'text': """This is a screenshot from Google Maps Timeline or Google Photos showing a location visit. Extract visit info and return ONLY valid JSON:
+- visit_date (YYYY-MM-DD or null)
+- arrival_time (HH:MM 24hr or null)
+- departure_time (HH:MM 24hr or null)
+- location_name (string - the place/business name)
+- address (string or null - street address if visible)
+- city (string or null)
+- notes (any other relevant details)
+
+Return ONLY valid JSON."""
+                    }
+                ]
+            }]
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=req_data,
+            headers={
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            result = json.loads(resp.read())
+        raw = result['content'][0]['text'].strip()
+        if raw.startswith('```'):
+            raw = raw.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        return jsonify(json.loads(raw))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================================

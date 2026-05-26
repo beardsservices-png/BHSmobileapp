@@ -91,7 +91,16 @@ python match_invoices_to_time.py --apply
 - Flask port 5000, React/Vite port 5173
 - Python 3.13 on Windows
 
+### 📍 Brian's Home Location
+- Address: 360 County Road 35, Clarkridge, AR 72623
+- GPS: 36.46519470, -92.31659698 (exact, user-provided)
+- Used as origin for all mileage calculations (`BRIAN_HOME_LAT/LON` in app.py)
+
 ### 🔗 Key Endpoints
 GET /api/dashboard, /api/customers, /api/jobs, /api/invoices
 GET /api/filing-cabinet, /api/time-entries, /api/service-categories
 POST /api/customers, /api/jobs/full, /api/time-entries
+DELETE /api/customers/<id>?force=1  -- deletes customer + all jobs/invoices
+DELETE /api/jobs/<id>               -- deletes job + invoice, unlinks time entries
+POST /api/invoice/parse-pdf         -- upload PDF, returns parsed invoice JSON
+POST /api/maps-screenshot/parse     -- upload image, returns parsed visit JSON

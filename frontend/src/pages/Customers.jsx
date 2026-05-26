@@ -87,7 +87,8 @@ export default function Customers() {
       // Reload full list so totals are included
       const listR = await fetch('/api/customers')
       const listData = await listR.json()
-      setCustomers(Array.isArray(listData) ? listData : (listData.customers || []))
+      const newList = Array.isArray(listData) ? listData : (listData.customers || [])
+      setCustomers(newList)
       setForm({ name: '', address: '', phone: '', email: '', notes: '', cya_notes: '' })
       setShowForm(false)
       setSelected({ id: newC.id, name: newC.name })
@@ -295,6 +296,17 @@ export default function Customers() {
             onCalcMileage={() => handleCalcMileage(selected.id)}
             calcMileage={calcMileage}
             onDetailChange={setDetail}
+            onCustomerUpdated={(updated) => {
+              setCustomers(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated } : c))
+              setSelected(prev => ({ ...prev, name: updated.name }))
+              setDetail(prev => ({ ...prev, ...updated }))
+            }}
+            onCustomerDeleted={(id) => {
+              setCustomers(prev => prev.filter(c => c.id !== id))
+              setSelected(null)
+              setDetail(null)
+              setMobileView('list')
+            }}
           />
         )}
         </div>
@@ -303,13 +315,47 @@ export default function Customers() {
   )
 }
 
-function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onDetailChange }) {
+function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onDetailChange, onCustomerUpdated, onCustomerDeleted }) {
   if (!detail) return (
     <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
   )
 
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [editForm, setEditForm] = useState({})
   const [cyaNotes, setCyaNotes] = useState(detail.cya_notes || '')
+
+  function startEdit() {
+    setEditForm({
+      name: detail.name || customer.name || '',
+      phone: detail.phone || '',
+      email: detail.email || '',
+      address: detail.address || '',
+      notes: detail.notes || '',
+    })
+    setEditing(true)
+  }
+
+  async function handleSaveEdit() {
+    if (!editForm.name?.trim()) return alert('Name is required')
+    setSaving(true)
+    try {
+      const r = await fetch(`/api/customers/${customer.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...editForm, cya_notes: cyaNotes }),
+      })
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error || 'Failed') }
+      setEditing(false)
+      if (onDetailChange) onDetailChange({ ...detail, ...editForm, cya_notes: cyaNotes })
+      if (onCustomerUpdated) onCustomerUpdated({ id: customer.id, ...editForm })
+    } catch (e) {
+      alert('Error saving: ' + e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   async function handleSaveCya() {
     setSaving(true)
@@ -317,7 +363,14 @@ function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onD
       await fetch(`/api/customers/${customer.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cya_notes: cyaNotes }),
+        body: JSON.stringify({
+          name: detail.name || customer.name,
+          phone: detail.phone,
+          email: detail.email,
+          address: detail.address,
+          notes: detail.notes,
+          cya_notes: cyaNotes,
+        }),
       })
       if (onDetailChange) onDetailChange({ ...detail, cya_notes: cyaNotes })
     } catch {
@@ -327,13 +380,27 @@ function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onD
     }
   }
 
-  const cyaChanged = cyaNotes !== (detail.cya_notes || '')
+  async function handleDelete() {
+    const jobCount = detail.jobs?.length || 0
+    const msg = jobCount > 0
+      ? `Delete "${customer.name}" and all ${jobCount} job(s) + invoices permanently? This cannot be undone.`
+      : `Delete "${customer.name}"? This cannot be undone.`
+    if (!window.confirm(msg)) return
+    setDeleting(true)
+    try {
+      const r = await fetch(`/api/customers/${customer.id}?force=1`, { method: 'DELETE' })
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error || 'Failed') }
+      if (onCustomerDeleted) onCustomerDeleted(customer.id)
+    } catch (e) {
+      alert('Error deleting: ' + e.message)
+      setDeleting(false)
+    }
+  }
 
+  const cyaChanged = cyaNotes !== (detail.cya_notes || '')
   const totalRevenue = detail.jobs?.reduce((s, j) => s + (j.total_amount || 0), 0) || 0
   const totalHours = detail.time_entries?.reduce((s, t) => s + (t.hours || 0), 0) || 0
   const avgRate = totalHours > 0 ? totalRevenue / totalHours : 0
-
-  // Compute total miles driven (round-trip * number of jobs as proxy)
   const jobCount = detail.jobs?.length || 0
   const totalMiles = detail.mileage_from_home != null ? Math.round(detail.mileage_from_home * 2 * jobCount) : null
 
@@ -341,55 +408,103 @@ function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onD
     <div className="space-y-5">
       {/* Header */}
       <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <div className="flex items-start justify-between">
+        {editing ? (
           <div>
-            <h2 className="text-xl font-bold text-gray-900">{customer.name}</h2>
-            {detail.address && <p className="text-gray-500 text-sm mt-1">{detail.address}</p>}
-            <div className="flex gap-4 mt-2">
-              {detail.phone && <a href={`tel:${detail.phone}`} className="text-sm text-blue-600">{detail.phone}</a>}
-              {detail.email && <a href={`mailto:${detail.email}`} className="text-sm text-blue-600">{detail.email}</a>}
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Edit Customer</h2>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Name *</label>
+                <input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Address</label>
+                <input value={editForm.address} onChange={e => setEditForm(f => ({ ...f, address: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Street address" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Phone</label>
+                <input value={editForm.phone} onChange={e => setEditForm(f => ({ ...f, phone: formatPhone(e.target.value) }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="(870) 555-1234" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Email</label>
+                <input type="email" value={editForm.email} onChange={e => setEditForm(f => ({ ...f, email: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="email@example.com" />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">General Notes</label>
+                <textarea rows={2} value={editForm.notes} onChange={e => setEditForm(f => ({ ...f, notes: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
             </div>
-
-            {/* Mileage — internal only */}
-            <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
-              {detail.mileage_from_home != null ? (
-                <>
-                  <span className="bg-gray-100 rounded px-2 py-0.5">
-                    <span className="font-medium text-gray-600">{detail.mileage_from_home} mi</span> one-way from home
-                  </span>
-                  {totalMiles != null && (
-                    <span className="bg-gray-100 rounded px-2 py-0.5">
-                      ~{totalMiles} mi total driven (est.)
-                    </span>
-                  )}
-                  <span className="italic text-gray-300">internal only</span>
-                </>
-              ) : (
-                detail.address && (
-                  <span className="text-gray-400 italic">Mileage not calculated</span>
-                )
-              )}
-              {detail.address && (
-                <button
-                  onClick={onCalcMileage}
-                  disabled={calcMileage}
-                  className="text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-2 py-0.5 hover:bg-blue-50 disabled:opacity-50"
-                >
-                  {calcMileage ? 'Calculating...' : detail.mileage_from_home ? 'Recalculate' : 'Calculate Mileage'}
-                </button>
-              )}
+            <div className="flex gap-2 mt-4">
+              <button onClick={handleSaveEdit} disabled={saving}
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+                {saving ? 'Saving...' : 'Save Changes'}
+              </button>
+              <button onClick={() => setEditing(false)}
+                className="text-gray-600 px-4 py-2 rounded-lg text-sm hover:bg-gray-100">
+                Cancel
+              </button>
             </div>
           </div>
-          <Link
-            to={`/estimate?customer=${customer.id}`}
-            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700"
-          >
-            New Estimate
-          </Link>
-        </div>
-        {detail.notes && <p className="mt-3 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">{detail.notes}</p>}
+        ) : (
+          <div className="flex items-start justify-between">
+            <div>
+              <h2 className="text-xl font-bold text-gray-900">{detail.name || customer.name}</h2>
+              {detail.address && <p className="text-gray-500 text-sm mt-1">{detail.address}</p>}
+              <div className="flex gap-4 mt-2">
+                {detail.phone && <a href={`tel:${detail.phone}`} className="text-sm text-blue-600">{detail.phone}</a>}
+                {detail.email && <a href={`mailto:${detail.email}`} className="text-sm text-blue-600">{detail.email}</a>}
+              </div>
+              <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
+                {detail.mileage_from_home != null ? (
+                  <>
+                    <span className="bg-gray-100 rounded px-2 py-0.5">
+                      <span className="font-medium text-gray-600">{detail.mileage_from_home} mi</span> one-way from home
+                    </span>
+                    {totalMiles != null && (
+                      <span className="bg-gray-100 rounded px-2 py-0.5">
+                        ~{totalMiles} mi total driven (est.)
+                      </span>
+                    )}
+                    <span className="italic text-gray-300">internal only</span>
+                  </>
+                ) : (
+                  detail.address && <span className="text-gray-400 italic">Mileage not calculated</span>
+                )}
+                {detail.address && (
+                  <button onClick={onCalcMileage} disabled={calcMileage}
+                    className="text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-2 py-0.5 hover:bg-blue-50 disabled:opacity-50">
+                    {calcMileage ? 'Calculating...' : detail.mileage_from_home ? 'Recalculate' : 'Calculate Mileage'}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 items-end">
+              <Link to={`/estimate?customer=${customer.id}`}
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
+                New Estimate
+              </Link>
+              <button onClick={startEdit}
+                className="text-sm text-gray-500 hover:text-gray-800 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
+                Edit Info
+              </button>
+              <button onClick={handleDelete} disabled={deleting}
+                className="text-sm text-red-500 hover:text-red-700 border border-red-200 rounded-lg px-3 py-1.5 hover:bg-red-50 disabled:opacity-50">
+                {deleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        )}
+        {!editing && detail.notes && <p className="mt-3 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">{detail.notes}</p>}
 
         {/* Notes */}
+        {!editing && (
         <div className="mt-4 border border-amber-300 rounded-xl bg-amber-50 p-4">
           <div className="mb-2">
             <span className="text-sm font-semibold text-amber-900">Notes</span>
@@ -403,15 +518,13 @@ function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onD
             className="w-full border border-amber-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 bg-amber-50 placeholder-amber-400 text-amber-900 resize-y"
           />
           {cyaChanged && (
-            <button
-              onClick={handleSaveCya}
-              disabled={saving}
-              className="mt-2 bg-amber-600 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-amber-700 disabled:opacity-50 font-medium"
-            >
+            <button onClick={handleSaveCya} disabled={saving}
+              className="mt-2 bg-amber-600 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-amber-700 disabled:opacity-50 font-medium">
               {saving ? 'Saving...' : 'Save Notes'}
             </button>
           )}
         </div>
+        )}
       </div>
 
       {/* Stats */}

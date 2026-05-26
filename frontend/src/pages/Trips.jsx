@@ -56,6 +56,11 @@ export default function Trips() {
   const [form, setForm]           = useState(EMPTY_FORM())
   const [editId, setEditId]       = useState(null)
 
+  // Maps screenshot import
+  const [showMapImport, setShowMapImport] = useState(false)
+  const [mapParsing, setMapParsing]       = useState(false)
+  const [mapParsed, setMapParsed]         = useState(null)
+
   const defaultRange = currentMonthRange()
   const [filterStart,   setFilterStart]   = useState(defaultRange.start)
   const [filterEnd,     setFilterEnd]     = useState(defaultRange.end)
@@ -168,6 +173,33 @@ export default function Trips() {
     setShowForm(false)
   }
 
+  async function handleMapScreenshot(file) {
+    if (!file) return
+    setMapParsing(true)
+    setMapParsed(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await fetch('/api/maps-screenshot/parse', { method: 'POST', body: fd })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error || 'Parse failed')
+      setMapParsed(data)
+      // Pre-fill the trip form with parsed data
+      setForm(f => ({
+        ...f,
+        trip_date: data.visit_date || f.trip_date,
+        destination: [data.location_name, data.address].filter(Boolean).join(' — ') || f.destination,
+        notes: [f.notes, data.notes].filter(Boolean).join(' '),
+      }))
+      setShowForm(true)
+      setShowMapImport(false)
+    } catch (e) {
+      alert('Could not parse screenshot: ' + e.message)
+    } finally {
+      setMapParsing(false)
+    }
+  }
+
   // jobs filtered to selected customer in form
   const formJobs = form.customer_id
     ? jobs.filter(j => String(j.customer_id) === String(form.customer_id))
@@ -185,12 +217,20 @@ export default function Trips() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-gray-900">Trip Log</h1>
-        <button
-          onClick={() => { if (showForm && !editId) { cancelForm() } else { setForm(EMPTY_FORM()); setEditId(null); setShowForm(true) } }}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 font-medium"
-        >
-          {showForm && !editId ? 'Cancel' : '+ Log a Trip'}
-        </button>
+        <div className="flex gap-2">
+          <label className="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg text-sm hover:bg-gray-200 font-medium cursor-pointer flex items-center gap-1.5"
+            title="Import from Google Maps screenshot">
+            {mapParsing ? 'Reading...' : '📸 From Screenshot'}
+            <input type="file" accept="image/*" className="hidden"
+              onChange={e => handleMapScreenshot(e.target.files?.[0])} disabled={mapParsing} />
+          </label>
+          <button
+            onClick={() => { if (showForm && !editId) { cancelForm() } else { setForm(EMPTY_FORM()); setEditId(null); setShowForm(true) } }}
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 font-medium"
+          >
+            {showForm && !editId ? 'Cancel' : '+ Log a Trip'}
+          </button>
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -237,6 +277,13 @@ export default function Trips() {
       {/* Add / Edit Form */}
       {showForm && (
         <div className="bg-white rounded-xl border border-blue-200 p-5">
+          {mapParsed && !editId && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 mb-4 text-sm text-blue-800">
+              Pre-filled from screenshot: <strong>{mapParsed.location_name || 'Location'}</strong>
+              {mapParsed.visit_date && <> on {mapParsed.visit_date}</>}.
+              Review and adjust miles before saving.
+            </div>
+          )}
           <h2 className="text-sm font-semibold text-gray-700 mb-4">
             {editId ? 'Edit Trip' : 'Log a New Trip'}
           </h2>

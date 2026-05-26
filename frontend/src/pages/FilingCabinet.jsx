@@ -85,6 +85,13 @@ export default function FilingCabinet() {
   })
   const [addingPayment, setAddingPayment] = useState(false)
   const [converting, setConverting] = useState(false)
+  const [deletingJob, setDeletingJob] = useState(false)
+
+  // PDF import state
+  const [showPdfImport, setShowPdfImport] = useState(false)
+  const [pdfParsing, setPdfParsing] = useState(false)
+  const [pdfParsed, setPdfParsed] = useState(null)
+  const [customers, setCustomers] = useState([])
 
   // ── Data Gaps state ───────────────────────────────────────────
   const [gaps, setGaps] = useState(null)
@@ -315,6 +322,71 @@ export default function FilingCabinet() {
     }
   }
 
+  // ── Delete job ────────────────────────────────────────────────
+  async function handleDeleteJob() {
+    if (!detail) return
+    if (!window.confirm(`Permanently delete invoice ${detail.invoice_number} for ${detail.customer_name}? This removes all services, time entries, and payments linked to this job.`)) return
+    setDeletingJob(true)
+    try {
+      const r = await fetch(`${API}/jobs/${detail.job_id}`, { method: 'DELETE' })
+      if (!r.ok) throw new Error((await r.json()).error || 'Failed')
+      setSelectedId(null)
+      setDetail(null)
+      await refreshList()
+    } catch (e) {
+      alert('Error deleting job: ' + e.message)
+    } finally {
+      setDeletingJob(false)
+    }
+  }
+
+  // ── PDF import ────────────────────────────────────────────────
+  async function handlePdfUpload(file) {
+    if (!file) return
+    setPdfParsing(true)
+    setPdfParsed(null)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await fetch(`${API}/invoice/parse-pdf`, { method: 'POST', body: fd })
+      const data = await r.json()
+      if (!r.ok) throw new Error(data.error || 'Parse failed')
+      // Pre-fill services if missing service_type
+      if (data.services) {
+        data.services = data.services.map(s => ({ ...s, service_type: s.service_type || 'labor' }))
+      }
+      setPdfParsed(data)
+      // Load customers for matching
+      if (customers.length === 0) {
+        const cr = await fetch(`${API}/customers`)
+        const cd = await cr.json()
+        setCustomers(Array.isArray(cd) ? cd : (cd.customers || []))
+      }
+    } catch (e) {
+      alert('Could not parse PDF: ' + e.message)
+    } finally {
+      setPdfParsing(false)
+    }
+  }
+
+  async function handlePdfSave(formData) {
+    try {
+      const r = await fetch(`${API}/filing-cabinet/new`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      })
+      if (!r.ok) throw new Error((await r.json()).error || 'Save failed')
+      const result = await r.json()
+      setShowPdfImport(false)
+      setPdfParsed(null)
+      await refreshList()
+      setSelectedId(result.job_id)
+    } catch (e) {
+      alert('Error saving: ' + e.message)
+    }
+  }
+
   // ── Detail state helpers ──────────────────────────────────────
   function setField(key, value) {
     setEdited(true)
@@ -373,12 +445,21 @@ export default function FilingCabinet() {
         <div className="p-4 border-b border-gray-100">
           <div className="flex items-center justify-between mb-3">
             <h1 className="text-lg font-bold text-gray-900">Filing Cabinet</h1>
-            <Link
-              to="/estimate"
-              className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 font-medium"
-            >
-              + New
-            </Link>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => { setShowPdfImport(true); setSelectedId(null); setPdfParsed(null); setMobileView('detail') }}
+                className="text-xs bg-gray-100 text-gray-700 px-2.5 py-1.5 rounded-lg hover:bg-gray-200 font-medium"
+                title="Import a PDF invoice"
+              >
+                PDF
+              </button>
+              <Link
+                to="/estimate"
+                className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 font-medium"
+              >
+                + New
+              </Link>
+            </div>
           </div>
           <input
             type="text"
@@ -500,7 +581,18 @@ export default function FilingCabinet() {
           />
         )}
 
-        {statusFilter !== 'gaps' && !selectedId && (
+        {showPdfImport && (
+          <PdfImportPanel
+            customers={customers}
+            parsing={pdfParsing}
+            parsed={pdfParsed}
+            onUpload={handlePdfUpload}
+            onSave={handlePdfSave}
+            onClose={() => { setShowPdfImport(false); setPdfParsed(null) }}
+          />
+        )}
+
+        {!showPdfImport && statusFilter !== 'gaps' && !selectedId && (
           <div className="flex flex-col items-center justify-center h-full text-gray-400">
             <div className="text-5xl mb-4">🗂</div>
             <div className="text-xl font-medium">Select a job</div>
@@ -562,6 +654,14 @@ export default function FilingCabinet() {
                     {saving ? 'Saving...' : 'Save Changes'}
                   </button>
                 )}
+                <button
+                  onClick={handleDeleteJob}
+                  disabled={deletingJob}
+                  className="bg-white border border-red-200 text-red-600 px-3 py-2 rounded-lg text-sm hover:bg-red-50 disabled:opacity-50 font-medium"
+                  title="Permanently delete this job"
+                >
+                  {deletingJob ? 'Deleting...' : 'Delete'}
+                </button>
               </div>
             </div>
 
@@ -1710,6 +1810,237 @@ function DataGapsPanel({
           )
         )}
       </div>
+    </div>
+  )
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+// PDF Import Panel
+// ─────────────────────────────────────────────────────────────────
+function PdfImportPanel({ customers, parsing, parsed, onUpload, onSave, onClose }) {
+  const [form, setForm] = useState(null)
+  const [saving, setSaving] = useState(false)
+  const [matchedCustomerId, setMatchedCustomerId] = useState('')
+  const [newCustomerMode, setNewCustomerMode] = useState(false)
+
+  useEffect(() => {
+    if (parsed) {
+      setForm({
+        customer_name: parsed.customer_name || '',
+        customer_address: parsed.customer_address || '',
+        customer_phone: parsed.customer_phone || '',
+        invoice_number: parsed.invoice_number || '',
+        invoice_date: parsed.invoice_date || new Date().toISOString().slice(0, 10),
+        services: parsed.services || [],
+        notes: parsed.notes || '',
+      })
+      setMatchedCustomerId('')
+      setNewCustomerMode(!parsed.customer_name)
+    }
+  }, [parsed])
+
+  function setField(key, val) { setForm(f => ({ ...f, [key]: val })) }
+  function updateSvc(i, key, val) {
+    setForm(f => {
+      const svcs = [...f.services]
+      svcs[i] = { ...svcs[i], [key]: val }
+      return { ...f, services: svcs }
+    })
+  }
+  function addSvc() {
+    setForm(f => ({ ...f, services: [...f.services, { description: '', amount: 0, service_type: 'labor' }] }))
+  }
+  function removeSvc(i) {
+    setForm(f => ({ ...f, services: f.services.filter((_, idx) => idx !== i) }))
+  }
+
+  async function handleSave() {
+    if (!form) return
+    if (!matchedCustomerId && !form.customer_name?.trim()) {
+      alert('Select an existing customer or enter a customer name')
+      return
+    }
+    setSaving(true)
+    try {
+      let customerId = matchedCustomerId || null
+      if (!customerId && form.customer_name) {
+        const cr = await fetch('/api/customers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: form.customer_name, address: form.customer_address, phone: form.customer_phone }),
+        })
+        const cd = await cr.json()
+        if (!cr.ok) throw new Error(cd.error || 'Failed to create customer')
+        customerId = cd.id
+      }
+      const totalLabor = form.services.filter(s => s.service_type === 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0)
+      const totalMaterials = form.services.filter(s => s.service_type !== 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0)
+      await onSave({
+        customer_id: customerId,
+        invoice_number: form.invoice_number,
+        start_date: form.invoice_date,
+        status: 'completed',
+        notes: form.notes,
+        services: form.services.map(s => ({
+          original_description: s.description,
+          amount: parseFloat(s.amount) || 0,
+          service_type: s.service_type || 'labor',
+          quantity: 1,
+          unit_of_measure: 'each',
+        })),
+        time_entries: [],
+      })
+    } catch (e) {
+      alert('Error: ' + e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="p-6 max-w-2xl space-y-5">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold text-gray-900">Import PDF Invoice</h2>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-sm">✕ Close</button>
+      </div>
+
+      {!parsed && (
+        <div className="bg-white rounded-xl border-2 border-dashed border-gray-300 p-10 text-center">
+          {parsing ? (
+            <div className="text-gray-500">
+              <div className="text-2xl mb-2">⏳</div>
+              <div>Reading and parsing PDF...</div>
+            </div>
+          ) : (
+            <>
+              <div className="text-4xl mb-3">📄</div>
+              <p className="text-gray-600 mb-4">Drop a PDF invoice here or click to select</p>
+              <label className="bg-blue-600 text-white px-5 py-2 rounded-lg cursor-pointer hover:bg-blue-700 text-sm font-medium">
+                Choose PDF
+                <input
+                  type="file"
+                  accept=".pdf"
+                  className="hidden"
+                  onChange={e => onUpload(e.target.files?.[0])}
+                />
+              </label>
+              <p className="text-xs text-gray-400 mt-3">Claude AI will extract the invoice data. You can review and edit before saving.</p>
+            </>
+          )}
+        </div>
+      )}
+
+      {parsed && form && (
+        <div className="space-y-4">
+          <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-2 text-sm text-green-800">
+            PDF parsed. Review the details below and correct anything that looks wrong before saving.
+          </div>
+
+          <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Customer</h3>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Match to existing customer</label>
+              <select
+                value={matchedCustomerId}
+                onChange={e => { setMatchedCustomerId(e.target.value); setNewCustomerMode(!e.target.value) }}
+                className={INPUT}
+              >
+                <option value="">— Create new customer from PDF data —</option>
+                {customers.filter(c => !c.name.startsWith('_')).map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+            {!matchedCustomerId && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-400 mb-1">Customer Name *</label>
+                  <input value={form.customer_name} onChange={e => setField('customer_name', e.target.value)} className={INPUT} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Phone</label>
+                  <input value={form.customer_phone} onChange={e => setField('customer_phone', e.target.value)} className={INPUT} />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Address</label>
+                  <input value={form.customer_address} onChange={e => setField('customer_address', e.target.value)} className={INPUT} />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+            <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Invoice Info</h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Invoice Number</label>
+                <input value={form.invoice_number} onChange={e => setField('invoice_number', e.target.value)} className={INPUT} placeholder="BHS20240101" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">Date</label>
+                <input type="date" value={form.invoice_date} onChange={e => setField('invoice_date', e.target.value)} className={INPUT} />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-400 mb-1">Notes</label>
+                <input value={form.notes} onChange={e => setField('notes', e.target.value)} className={INPUT} />
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Services / Line Items</h3>
+              <button onClick={addSvc} className="text-xs text-blue-600 hover:text-blue-800">+ Add line</button>
+            </div>
+            {form.services.map((svc, i) => (
+              <div key={i} className="flex gap-2 items-center">
+                <input
+                  value={svc.description}
+                  onChange={e => updateSvc(i, 'description', e.target.value)}
+                  className={INPUT_SM + ' flex-1'}
+                  placeholder="Description"
+                />
+                <select
+                  value={svc.service_type}
+                  onChange={e => updateSvc(i, 'service_type', e.target.value)}
+                  className={INPUT_SM + ' w-28'}
+                >
+                  <option value="labor">Labor</option>
+                  <option value="materials">Materials</option>
+                </select>
+                <input
+                  type="number"
+                  value={svc.amount}
+                  onChange={e => updateSvc(i, 'amount', e.target.value)}
+                  className={INPUT_SM + ' w-24'}
+                  placeholder="$0"
+                  min="0"
+                />
+                <button onClick={() => removeSvc(i)} className="text-red-400 hover:text-red-600 text-sm px-1">✕</button>
+              </div>
+            ))}
+            <div className="text-sm text-gray-500 pt-2 border-t border-gray-100">
+              Labor: {fmt(form.services.filter(s => s.service_type === 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0))}
+              {' · '}
+              Materials: {fmt(form.services.filter(s => s.service_type !== 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0))}
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button onClick={handleSave} disabled={saving}
+              className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+              {saving ? 'Saving...' : 'Save to Database'}
+            </button>
+            <button onClick={() => { onClose(); }} className="text-gray-600 px-4 py-2 rounded-lg text-sm hover:bg-gray-100">
+              Cancel
+            </button>
+            <button onClick={() => { setSaving(false); }} className="ml-auto text-xs text-gray-400 hover:text-gray-600">
+              Upload different PDF
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
