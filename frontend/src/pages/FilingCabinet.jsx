@@ -668,7 +668,7 @@ export default function FilingCabinet() {
             {/* ── CUSTOMER CARD ──────────────────────────────────── */}
             <div className="bg-white rounded-xl border border-gray-200 p-5">
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Customer</h3>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Name</label>
                   <input
@@ -737,7 +737,7 @@ export default function FilingCabinet() {
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
                 {isEstimate ? 'Estimate Details' : 'Invoice Details'}
               </h3>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">
                     {isEstimate ? 'Estimate #' : 'Invoice #'}
@@ -783,7 +783,7 @@ export default function FilingCabinet() {
                     className={INPUT}
                   />
                 </div>
-                <div className="col-span-3">
+                <div className="sm:col-span-3">
                   <label className="block text-xs text-gray-400 mb-1">Notes</label>
                   <textarea
                     rows={2}
@@ -793,7 +793,7 @@ export default function FilingCabinet() {
                     className={INPUT}
                   />
                 </div>
-                <div className="col-span-3">
+                <div className="sm:col-span-3">
                   <label className="block text-xs text-gray-400 mb-1">Google Photos Album</label>
                   <input
                     type="url"
@@ -827,8 +827,8 @@ export default function FilingCabinet() {
                 </button>
               </div>
 
-              {/* Column headers */}
-              <div className="grid gap-2 px-5 py-2 text-xs text-gray-400 font-medium bg-gray-50 border-b border-gray-100"
+              {/* Column headers — desktop only */}
+              <div className="hidden md:grid gap-2 px-5 py-2 text-xs text-gray-400 font-medium bg-gray-50 border-b border-gray-100"
                    style={{gridTemplateColumns: '3fr 1.5fr 55px 60px 75px 80px 28px'}}>
                 <div>Description</div>
                 <div>Category</div>
@@ -841,71 +841,144 @@ export default function FilingCabinet() {
 
               <div className="divide-y divide-gray-50">
                 {(detail.services || []).map((svc, idx) => (
-                  <div key={idx}
-                       className="grid gap-2 px-5 py-2 items-center"
-                       style={{gridTemplateColumns: '3fr 1.5fr 55px 60px 75px 80px 28px'}}>
-                    <input
-                      type="text"
-                      value={svc.standardized_description || svc.original_description || ''}
-                      onChange={e => {
-                        updateService(idx, 'standardized_description', e.target.value)
-                        updateService(idx, 'original_description', e.target.value)
-                      }}
-                      placeholder="Service description"
-                      className={INPUT_SM}
-                    />
-                    <select
-                      value={svc.category || ''}
-                      onChange={e => updateService(idx, 'category', e.target.value)}
-                      className={INPUT_SM}
-                    >
-                      <option value="">-- category --</option>
-                      {topLevelCats.map(c => (
-                        <optgroup key={c.id} label={c.name}>
-                          <option value={c.name}>{c.name} (general)</option>
-                          {(subcatMap[c.id] || []).map(sub => (
-                            <option key={sub.id} value={sub.name}>{sub.name}</option>
+                  <div key={idx}>
+                    {/* ── Mobile card layout ── */}
+                    <div className="md:hidden px-4 py-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={svc.standardized_description || svc.original_description || ''}
+                          onChange={e => {
+                            updateService(idx, 'standardized_description', e.target.value)
+                            updateService(idx, 'original_description', e.target.value)
+                          }}
+                          placeholder="Service description"
+                          className={`${INPUT_SM} flex-1`}
+                        />
+                        <button
+                          onClick={() => removeService(idx)}
+                          className="text-gray-300 hover:text-red-500 text-xl leading-none font-light flex-shrink-0 px-1"
+                        >×</button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <select
+                          value={svc.category || ''}
+                          onChange={e => updateService(idx, 'category', e.target.value)}
+                          className={INPUT_SM}
+                        >
+                          <option value="">-- category --</option>
+                          {topLevelCats.map(c => (
+                            <optgroup key={c.id} label={c.name}>
+                              <option value={c.name}>{c.name} (general)</option>
+                              {(subcatMap[c.id] || []).map(sub => (
+                                <option key={sub.id} value={sub.name}>{sub.name}</option>
+                              ))}
+                            </optgroup>
                           ))}
-                        </optgroup>
-                      ))}
-                    </select>
-                    <select
-                      value={svc.service_type || 'labor'}
-                      onChange={e => updateService(idx, 'service_type', e.target.value)}
-                      className={INPUT_SM}
-                    >
-                      <option value="labor">Labor</option>
-                      <option value="materials">Materials</option>
-                    </select>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={svc.quantity ?? 1}
-                      onChange={e => updateService(idx, 'quantity', parseFloat(e.target.value) || 1)}
-                      className={`${INPUT_SM} text-center`}
-                    />
-                    <select
-                      value={svc.unit_of_measure || 'each'}
-                      onChange={e => updateService(idx, 'unit_of_measure', e.target.value)}
-                      className={INPUT_SM}
-                    >
-                      {UOM_OPTIONS.map(u => <option key={u} value={u}>{u}</option>)}
-                    </select>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={svc.amount || ''}
-                      onChange={e => updateService(idx, 'amount', parseFloat(e.target.value) || 0)}
-                      className={`${INPUT_SM} text-right`}
-                    />
-                    <button
-                      onClick={() => removeService(idx)}
-                      className="text-gray-300 hover:text-red-500 text-xl leading-none font-light text-center"
-                    >
-                      ×
-                    </button>
+                        </select>
+                        <select
+                          value={svc.service_type || 'labor'}
+                          onChange={e => updateService(idx, 'service_type', e.target.value)}
+                          className={INPUT_SM}
+                        >
+                          <option value="labor">Labor</option>
+                          <option value="materials">Materials</option>
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={svc.quantity ?? 1}
+                          onChange={e => updateService(idx, 'quantity', parseFloat(e.target.value) || 1)}
+                          placeholder="Qty"
+                          className={`${INPUT_SM} text-center`}
+                        />
+                        <select
+                          value={svc.unit_of_measure || 'each'}
+                          onChange={e => updateService(idx, 'unit_of_measure', e.target.value)}
+                          className={INPUT_SM}
+                        >
+                          {UOM_OPTIONS.map(u => <option key={u} value={u}>{u}</option>)}
+                        </select>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={svc.amount || ''}
+                          onChange={e => updateService(idx, 'amount', parseFloat(e.target.value) || 0)}
+                          placeholder="$"
+                          className={`${INPUT_SM} text-right`}
+                        />
+                      </div>
+                    </div>
+                    {/* ── Desktop grid layout ── */}
+                    <div className="hidden md:grid gap-2 px-5 py-2 items-center"
+                         style={{gridTemplateColumns: '3fr 1.5fr 55px 60px 75px 80px 28px'}}>
+                      <input
+                        type="text"
+                        value={svc.standardized_description || svc.original_description || ''}
+                        onChange={e => {
+                          updateService(idx, 'standardized_description', e.target.value)
+                          updateService(idx, 'original_description', e.target.value)
+                        }}
+                        placeholder="Service description"
+                        className={INPUT_SM}
+                      />
+                      <select
+                        value={svc.category || ''}
+                        onChange={e => updateService(idx, 'category', e.target.value)}
+                        className={INPUT_SM}
+                      >
+                        <option value="">-- category --</option>
+                        {topLevelCats.map(c => (
+                          <optgroup key={c.id} label={c.name}>
+                            <option value={c.name}>{c.name} (general)</option>
+                            {(subcatMap[c.id] || []).map(sub => (
+                              <option key={sub.id} value={sub.name}>{sub.name}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                      <select
+                        value={svc.service_type || 'labor'}
+                        onChange={e => updateService(idx, 'service_type', e.target.value)}
+                        className={INPUT_SM}
+                      >
+                        <option value="labor">Labor</option>
+                        <option value="materials">Materials</option>
+                      </select>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={svc.quantity ?? 1}
+                        onChange={e => updateService(idx, 'quantity', parseFloat(e.target.value) || 1)}
+                        className={`${INPUT_SM} text-center`}
+                      />
+                      <select
+                        value={svc.unit_of_measure || 'each'}
+                        onChange={e => updateService(idx, 'unit_of_measure', e.target.value)}
+                        className={INPUT_SM}
+                      >
+                        {UOM_OPTIONS.map(u => <option key={u} value={u}>{u}</option>)}
+                      </select>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={svc.amount || ''}
+                        onChange={e => updateService(idx, 'amount', parseFloat(e.target.value) || 0)}
+                        className={`${INPUT_SM} text-right`}
+                      />
+                      <button
+                        onClick={() => removeService(idx)}
+                        className="text-gray-300 hover:text-red-500 text-xl leading-none font-light text-center"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </div>
                 ))}
                 {(!detail.services || detail.services.length === 0) && (
