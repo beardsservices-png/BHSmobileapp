@@ -1,5 +1,9 @@
 import { useState, useEffect } from 'react'
 
+function parseMeta(lead) {
+  try { return JSON.parse(lead.metadata || '{}') } catch { return {} }
+}
+
 const STATUS_TABS = [
   { key: 'new', label: 'New' },
   { key: 'read', label: 'Read' },
@@ -185,12 +189,31 @@ export default function Leads() {
                   {lead.contact_name && (
                     <div className="text-xs text-slate-500">{formatPhone(lead.from_number)}</div>
                   )}
-                  <p className="text-sm text-slate-600 mt-0.5 line-clamp-2">{lead.message}</p>
-                  {lead.customer_name && (
-                    <span className="inline-block mt-1 text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
-                      {lead.customer_name}
-                    </span>
+                  {lead.source === 'call' ? (
+                    <p className="text-sm text-slate-600 mt-0.5 line-clamp-2">
+                      {parseMeta(lead).service_requested || lead.message}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-slate-600 mt-0.5 line-clamp-2">{lead.message}</p>
                   )}
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {lead.source === 'call' && (
+                      <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Call</span>
+                    )}
+                    {lead.source === 'sms' && (
+                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">Text</span>
+                    )}
+                    {lead.customer_name && (
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
+                        {lead.customer_name}
+                      </span>
+                    )}
+                    {parseMeta(lead).location && (
+                      <span className="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                        {parseMeta(lead).location}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {lead.status === 'new' && (
@@ -201,10 +224,42 @@ export default function Leads() {
               {/* Expanded detail */}
               {expanded === lead.id && (
                 <div className="px-4 pb-4 space-y-3 border-t border-slate-100 pt-3">
-                  {/* Full message */}
-                  <div className="bg-slate-50 rounded-xl p-3">
-                    <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.message}</p>
-                  </div>
+                  {/* Full message / call detail */}
+                  {lead.source === 'call' ? (() => {
+                    const m = parseMeta(lead)
+                    return (
+                      <div className="bg-purple-50 rounded-xl p-3 space-y-2">
+                        {m.service_requested && (
+                          <div>
+                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Service Needed</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.service_requested}</p>
+                          </div>
+                        )}
+                        {m.location && (
+                          <div>
+                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Location</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.location}</p>
+                          </div>
+                        )}
+                        {m.call_summary && (
+                          <div>
+                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Call Summary</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.call_summary}</p>
+                          </div>
+                        )}
+                        {m.caller_notes && (
+                          <div>
+                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Caller Notes</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.caller_notes}</p>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })() : (
+                    <div className="bg-slate-50 rounded-xl p-3">
+                      <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.message}</p>
+                    </div>
+                  )}
 
                   {/* Notes */}
                   <div>
@@ -307,17 +362,23 @@ export default function Leads() {
         </div>
       )}
 
-      {/* SMS Forwarder setup tip */}
-      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-sm text-slate-500">
-        <p className="font-medium text-slate-700 mb-1">SMS Forwarder Setup</p>
-        <p>Point SMS Forwarder to:</p>
-        <code className="block mt-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700 break-all">
-          {window.location.origin}/api/webhook/sms?token=WebhookSecret
-        </code>
-        <p className="mt-2">Body template:</p>
-        <code className="block mt-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700">
-          {'{"from":"{{from}}","contact":"{{contact}}","message":"{{message}}"}'}
-        </code>
+      {/* Setup tips */}
+      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 text-sm text-slate-500 space-y-4">
+        <div>
+          <p className="font-medium text-slate-700 mb-1">SMS Forwarder</p>
+          <code className="block bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700 break-all">
+            {window.location.origin}/api/webhook/sms?token=WebhookSecret
+          </code>
+          <code className="block mt-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700">
+            {'{"from":"{{from}}","contact":"{{contact}}","message":"{{message}}"}'}
+          </code>
+        </div>
+        <div>
+          <p className="font-medium text-slate-700 mb-1">Retell / Call Handler Webhook</p>
+          <code className="block bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700 break-all">
+            {window.location.origin}/api/webhook/call?token=WebhookSecret
+          </code>
+        </div>
       </div>
     </div>
   )

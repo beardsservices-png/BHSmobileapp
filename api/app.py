@@ -130,8 +130,13 @@ def migrate_db():
         customer_id INTEGER REFERENCES customers(id),
         job_id INTEGER REFERENCES jobs(id),
         notes TEXT,
+        metadata TEXT,
         created_at TEXT DEFAULT (datetime('now'))
     )''')
+    try:
+        cursor.execute("ALTER TABLE leads ADD COLUMN metadata TEXT")
+    except Exception:
+        pass
 
     # payments table
     cursor.execute('''CREATE TABLE IF NOT EXISTS payments (
@@ -3469,6 +3474,92 @@ def webhook_sms():
         INSERT INTO leads (source, from_number, contact_name, message, received_at, status, customer_id)
         VALUES ('sms', ?, ?, ?, ?, 'new', ?)
     ''', (from_number, contact_name, message, received_at, customer_id))
+    lead_id = cursor.lastrowid
+    conn.commit()
+
+    lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
+    conn.close()
+    return jsonify(lead), 201
+
+
+@app.route('/api/webhook/call', methods=['POST'])
+def webhook_call():
+    """Receive call summaries from Retell AI or bhs-memory-server."""
+    token = request.args.get('token') or request.headers.get('X-Webhook-Token', '')
+    if token != WEBHOOK_SECRET:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True) or {}
+
+    # Handle raw Retell webhook format
+    call = data.get('call', data)
+    analysis = call.get('call_analysis', {})
+    custom = analysis.get('custom_analysis_data', {})
+
+    # Extract fields — supports both Retell native and bhs-memory-server formats
+    from_number = (
+        call.get('from_number') or
+        data.get('caller_phone') or
+        data.get('from_number') or ''
+    ).strip()
+
+    contact_name = (
+        custom.get('caller_name') or
+        data.get('caller_name') or
+        data.get('contact_name') or ''
+    ).strip() or None
+
+    service_requested = (
+        custom.get('service_requested') or
+        data.get('service_requested') or ''
+    ).strip()
+
+    location = (
+        custom.get('location') or
+        data.get('location') or ''
+    ).strip()
+
+    call_summary = (
+        analysis.get('call_summary') or
+        data.get('call_summary') or
+        data.get('summary') or
+        call.get('transcript', '')[:500]
+    ).strip()
+
+    caller_notes = (
+        custom.get('caller_notes') or
+        data.get('caller_notes') or ''
+    ).strip()
+
+    received_at = data.get('call_date') or datetime.utcnow().isoformat()
+
+    # Build the message shown in the inbox
+    parts = []
+    if service_requested:
+        parts.append(f"Service: {service_requested}")
+    if location:
+        parts.append(f"Location: {location}")
+    if call_summary:
+        parts.append(f"Summary: {call_summary}")
+    if caller_notes:
+        parts.append(f"Notes: {caller_notes}")
+    message = '\n'.join(parts) or call_summary or 'No details captured'
+
+    meta = json.dumps({
+        'service_requested': service_requested,
+        'location': location,
+        'call_summary': call_summary,
+        'caller_notes': caller_notes,
+    })
+
+    conn = get_db()
+    cursor = conn.cursor()
+    customer_id = _match_customer_by_phone(cursor, from_number)
+
+    cursor.execute('''
+        INSERT INTO leads (source, from_number, contact_name, message, received_at, status, customer_id, metadata)
+        VALUES ('call', ?, ?, ?, ?, 'new', ?, ?)
+    ''', (from_number, contact_name, message, received_at, customer_id, meta))
     lead_id = cursor.lastrowid
     conn.commit()
 
