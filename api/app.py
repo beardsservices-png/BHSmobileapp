@@ -138,6 +138,14 @@ def migrate_db():
     except Exception:
         pass
 
+    # excluded_numbers — personal contacts that should never create leads
+    cursor.execute('''CREATE TABLE IF NOT EXISTS excluded_numbers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT UNIQUE NOT NULL,
+        label TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
     # payments table
     cursor.execute('''CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3505,6 +3513,28 @@ def webhook_call():
 
     from_number = (call.get('from_number') or data.get('from_number') or '').strip()
 
+    # Skip spam calls
+    is_spam = str(custom.get('is_spam', 'false')).lower() in ('true', '1')
+    if is_spam:
+        _threading.Thread(target=_forward_raw(raw_body, retell_sig), daemon=True).start()
+        return jsonify({'skipped': 'spam'}), 200
+
+    # Skip calls under 20 seconds (inactivity hang-ups, wrong numbers, accidentals)
+    start_ts = call.get('start_timestamp') or 0
+    end_ts = call.get('end_timestamp') or 0
+    duration_s = (end_ts - start_ts) / 1000 if start_ts and end_ts else 999
+    if duration_s < 20:
+        _threading.Thread(target=_forward_raw(raw_body, retell_sig), daemon=True).start()
+        return jsonify({'skipped': 'too_short'}), 200
+
+    # Skip personal/excluded numbers
+    norm_from = _normalize_phone(from_number)
+    conn_check = get_db()
+    excluded = rows_to_list(conn_check.execute('SELECT phone FROM excluded_numbers').fetchall())
+    conn_check.close()
+    if any(_normalize_phone(e['phone']) == norm_from for e in excluded):
+        return jsonify({'skipped': 'excluded'}), 200
+
     contact_name = (
         custom.get('caller_name') or data.get('caller_name') or ''
     ).strip() or None
@@ -3547,24 +3577,62 @@ def webhook_call():
     lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
     conn.close()
 
-    # Forward original raw bytes + Retell signature header so bhs-memory-server can verify
-    def _forward():
+    def _fwd():
+        _forward_raw(raw_body, retell_sig)()
+    _threading.Thread(target=_fwd, daemon=True).start()
+
+    return jsonify(lead), 201
+
+
+def _forward_raw(raw_body, retell_sig):
+    def _do():
         try:
             fwd = urllib.request.Request(
                 BHS_MEMORY_WEBHOOK_URL,
                 data=raw_body,
-                headers={
-                    'Content-Type': 'application/json',
-                    'x-retell-signature': retell_sig,
-                },
+                headers={'Content-Type': 'application/json', 'x-retell-signature': retell_sig},
                 method='POST'
             )
             urllib.request.urlopen(fwd, timeout=8)
         except Exception:
             pass
-    _threading.Thread(target=_forward, daemon=True).start()
+    return _do
 
-    return jsonify(lead), 201
+
+# ── Excluded numbers (personal contacts) ──────────────────────────────────────
+
+@app.route('/api/excluded-numbers', methods=['GET'])
+def get_excluded_numbers():
+    conn = get_db()
+    rows = rows_to_list(conn.execute('SELECT * FROM excluded_numbers ORDER BY label').fetchall())
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/excluded-numbers', methods=['POST'])
+def add_excluded_number():
+    data = request.get_json() or {}
+    phone = _normalize_phone(data.get('phone', ''))
+    label = (data.get('label') or '').strip() or None
+    if not phone:
+        return jsonify({'error': 'phone required'}), 400
+    conn = get_db()
+    try:
+        conn.execute('INSERT INTO excluded_numbers (phone, label) VALUES (?, ?)', (phone, label))
+        conn.commit()
+    except Exception:
+        conn.close()
+        return jsonify({'error': 'already exists'}), 409
+    row = row_to_dict(conn.execute('SELECT * FROM excluded_numbers WHERE phone = ?', (phone,)).fetchone())
+    conn.close()
+    return jsonify(row), 201
+
+@app.route('/api/excluded-numbers/<int:nid>', methods=['DELETE'])
+def delete_excluded_number(nid):
+    conn = get_db()
+    conn.execute('DELETE FROM excluded_numbers WHERE id = ?', (nid,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
 
 
 @app.route('/api/leads', methods=['GET'])

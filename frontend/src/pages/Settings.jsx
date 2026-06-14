@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 const TOGGLEABLE = [
   { key: 'filing-cabinet', label: 'Filing Cabinet', desc: 'View and manage all jobs' },
@@ -22,8 +22,41 @@ function getHidden() {
   catch { return [] }
 }
 
+function formatPhone(num) {
+  const d = (num || '').replace(/\D/g, '')
+  if (d.length === 10) return `(${d.slice(0,3)}) ${d.slice(3,6)}-${d.slice(6)}`
+  return num
+}
+
 export default function Settings() {
   const [hidden, setHidden] = useState(getHidden)
+  const [excluded, setExcluded] = useState([])
+  const [newPhone, setNewPhone] = useState('')
+  const [newLabel, setNewLabel] = useState('')
+  const [adding, setAdding] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/excluded-numbers').then(r => r.json()).then(setExcluded).catch(() => {})
+  }, [])
+
+  async function addNumber() {
+    if (!newPhone.trim()) return
+    const res = await fetch('/api/excluded-numbers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: newPhone.trim(), label: newLabel.trim() })
+    })
+    if (res.ok) {
+      const row = await res.json()
+      setExcluded(e => [...e, row])
+      setNewPhone(''); setNewLabel(''); setAdding(false)
+    }
+  }
+
+  async function removeNumber(id) {
+    await fetch(`/api/excluded-numbers/${id}`, { method: 'DELETE' })
+    setExcluded(e => e.filter(n => n.id !== id))
+  }
 
   function toggle(key) {
     setHidden(prev => {
@@ -73,6 +106,65 @@ export default function Settings() {
               </div>
             )
           })}
+        </div>
+      </div>
+
+      {/* Personal contacts — excluded from Leads inbox */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-slate-700">Personal Contacts</p>
+            <p className="text-xs text-slate-400 mt-0.5">Calls from these numbers won't create leads</p>
+          </div>
+          <button
+            onClick={() => setAdding(a => !a)}
+            className="text-xs font-semibold text-blue-600 px-3 py-1.5 bg-blue-50 rounded-lg"
+          >
+            + Add
+          </button>
+        </div>
+
+        {adding && (
+          <div className="px-5 py-3 border-b border-slate-100 space-y-2">
+            <input
+              type="tel"
+              placeholder="Phone number"
+              value={newPhone}
+              onChange={e => setNewPhone(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+            />
+            <input
+              type="text"
+              placeholder="Name (optional)"
+              value={newLabel}
+              onChange={e => setNewLabel(e.target.value)}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
+            />
+            <div className="flex gap-2">
+              <button onClick={addNumber} className="flex-1 bg-blue-600 text-white rounded-lg py-2 text-sm font-semibold">Save</button>
+              <button onClick={() => setAdding(false)} className="px-4 bg-slate-100 text-slate-600 rounded-lg text-sm">Cancel</button>
+            </div>
+          </div>
+        )}
+
+        <div className="divide-y divide-slate-50">
+          {excluded.length === 0 && !adding && (
+            <p className="px-5 py-4 text-sm text-slate-400">No personal contacts added yet</p>
+          )}
+          {excluded.map(n => (
+            <div key={n.id} className="flex items-center justify-between px-5 py-3">
+              <div>
+                <div className="text-sm font-medium text-slate-800">{n.label || formatPhone(n.phone)}</div>
+                {n.label && <div className="text-xs text-slate-400">{formatPhone(n.phone)}</div>}
+              </div>
+              <button
+                onClick={() => removeNumber(n.id)}
+                className="text-xs text-red-500 font-medium px-2 py-1 hover:bg-red-50 rounded"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
         </div>
       </div>
 
