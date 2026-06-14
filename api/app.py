@@ -3462,26 +3462,37 @@ def _match_customer_by_phone(cursor, phone):
 
 
 def _extract_sms_fields(message_texts, api_key):
-    """Use Claude to extract structured fields from SMS conversation text."""
+    """Extract estimate-ready job data from SMS conversation using Claude."""
     if not api_key or not message_texts:
         return {}
     conv = '\n'.join(f'- {t}' for t in message_texts if t)
-    prompt = f"""Extract structured info from this SMS conversation with a potential handyman customer.
+    prompt = f"""You extract job data from customer text messages to pre-fill a handyman estimate form.
 
 Messages:
 {conv}
 
-Return ONLY a JSON object, no explanation:
+Return ONLY valid JSON, no explanation:
 {{
-  "service_requested": "what service or repair they need, or null",
-  "location": "address or location description, or null",
-  "caller_notes": "important details like timing, access, urgency, or null",
-  "contact_name": "their name if they mentioned it, or null"
-}}"""
+  "contact_name": "their name if mentioned, or null",
+  "address": "full service address if mentioned, or null",
+  "access_notes": "lock codes, gate codes, key location, pets, access instructions, or null",
+  "service_lines": [
+    {{"description": "specific task", "quantity": 1, "unit": "each"}}
+  ],
+  "materials": "material type, brand, specs, color if mentioned, or null",
+  "measurements": "room sizes, dimensions, square footage, or null",
+  "timeline": "when they want it done, or null",
+  "caller_notes": "other job-relevant details, or null"
+}}
+
+Rules:
+- service_lines: one entry per distinct task. Infer units from context: flooring/decking/painting=sq.ft., fence/baseboard/trim=lin.ft., doors/windows/fixtures/outlets=each, time-based=hr. Use quantity from context or 1 if unknown.
+- Return [] for service_lines if no specific work mentioned yet.
+- Never invent data not stated. Use null for missing fields."""
     try:
         req_data = json.dumps({
             'model': 'claude-haiku-4-5-20251001',
-            'max_tokens': 300,
+            'max_tokens': 500,
             'messages': [{'role': 'user', 'content': prompt}]
         }).encode()
         req = urllib.request.Request(
@@ -3549,12 +3560,21 @@ def webhook_sms():
             date_str = dt.strftime('%b %d')
             note_parts = [f'[{date_str} Text] {message}']
             extras = []
-            if fields.get('service_requested'):
-                extras.append(f"Service: {fields['service_requested']}")
-            if fields.get('location'):
-                extras.append(f"Location: {fields['location']}")
+            if fields.get('service_lines'):
+                svc = ', '.join(sl.get('description','') for sl in fields['service_lines'] if sl.get('description'))
+                if svc: extras.append(f"Service: {svc}")
+            if fields.get('address'):
+                extras.append(f"Address: {fields['address']}")
+            if fields.get('access_notes'):
+                extras.append(f"Access: {fields['access_notes']}")
+            if fields.get('measurements'):
+                extras.append(f"Measurements: {fields['measurements']}")
+            if fields.get('materials'):
+                extras.append(f"Materials: {fields['materials']}")
+            if fields.get('timeline'):
+                extras.append(f"Timeline: {fields['timeline']}")
             if fields.get('caller_notes'):
-                extras.append(f"Notes: {fields['caller_notes']}")
+                extras.append(fields['caller_notes'])
             if extras:
                 note_parts.append(' | '.join(extras))
             new_note_line = '\n'.join(note_parts)
@@ -3592,12 +3612,19 @@ def webhook_sms():
 
         fields = _extract_sms_fields([m['text'] for m in messages], api_key)
 
+        def _keep(new, old):
+            return new if new else old
+
         meta.update({
             'messages': messages,
             'message_count': len(messages),
-            'service_requested': fields.get('service_requested') or meta.get('service_requested'),
-            'location': fields.get('location') or meta.get('location'),
-            'caller_notes': fields.get('caller_notes') or meta.get('caller_notes'),
+            'address': _keep(fields.get('address'), meta.get('address')),
+            'access_notes': _keep(fields.get('access_notes'), meta.get('access_notes')),
+            'service_lines': fields.get('service_lines') or meta.get('service_lines', []),
+            'materials': _keep(fields.get('materials'), meta.get('materials')),
+            'measurements': _keep(fields.get('measurements'), meta.get('measurements')),
+            'timeline': _keep(fields.get('timeline'), meta.get('timeline')),
+            'caller_notes': _keep(fields.get('caller_notes'), meta.get('caller_notes')),
         })
         resolved_name = existing.get('contact_name') or fields.get('contact_name') or contact_name
 
@@ -3615,8 +3642,12 @@ def webhook_sms():
         meta = {
             'messages': [{'text': message, 'received_at': received_at}],
             'message_count': 1,
-            'service_requested': fields.get('service_requested'),
-            'location': fields.get('location'),
+            'address': fields.get('address'),
+            'access_notes': fields.get('access_notes'),
+            'service_lines': fields.get('service_lines', []),
+            'materials': fields.get('materials'),
+            'measurements': fields.get('measurements'),
+            'timeline': fields.get('timeline'),
             'caller_notes': fields.get('caller_notes'),
         }
         cursor.execute('''

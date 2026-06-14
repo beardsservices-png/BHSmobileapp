@@ -176,14 +176,35 @@ export default function Estimate() {
   const [claudeSuggestion, setClaudeSuggestion] = useState({})
   const [loadingClaude, setLoadingClaude]       = useState({})
 
-  const [form, setForm] = useState({
-    customer_id:    searchParams.get('customer') || '',
-    invoice_number: '',
-    start_date:     new Date().toISOString().slice(0, 10),
-    status:         'estimate',
-    estimated_days: '',
-    notes:          '',
-    services:       [EMPTY_SERVICE()],
+  const [form, setForm] = useState(() => {
+    let prefill = null
+    try {
+      const raw = localStorage.getItem('bhs_estimate_prefill')
+      if (raw) {
+        prefill = JSON.parse(raw)
+        localStorage.removeItem('bhs_estimate_prefill')
+      }
+    } catch {}
+    return {
+      customer_id:    prefill?.customer_id || searchParams.get('customer') || '',
+      invoice_number: '',
+      start_date:     new Date().toISOString().slice(0, 10),
+      status:         'estimate',
+      estimated_days: '',
+      notes:          prefill?.notes || '',
+      services:       prefill?.services?.length ? prefill.services : [EMPTY_SERVICE()],
+    }
+  })
+
+  const [prefillCustomer, setPrefillCustomer] = useState(() => {
+    try {
+      const raw = localStorage.getItem('bhs_estimate_prefill_customer')
+      if (raw) {
+        localStorage.removeItem('bhs_estimate_prefill_customer')
+        return JSON.parse(raw)
+      }
+    } catch {}
+    return null
   })
 
   useEffect(() => {

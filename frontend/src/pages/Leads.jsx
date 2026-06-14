@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 
 function parseMeta(lead) {
   try { return JSON.parse(lead.metadata || '{}') } catch { return {} }
@@ -117,6 +118,57 @@ export default function Leads() {
     !customerSearch || c.name.toLowerCase().includes(customerSearch.toLowerCase())
   )
 
+  const navigate = useNavigate()
+
+  async function createEstimate(lead) {
+    const m = parseMeta(lead)
+    const customerId = linkCustomerId || lead.customer_id
+
+    const notesParts = []
+    if (m.access_notes) notesParts.push(`Access: ${m.access_notes}`)
+    if (m.measurements) notesParts.push(`Measurements: ${m.measurements}`)
+    if (m.materials) notesParts.push(`Materials: ${m.materials}`)
+    if (m.timeline) notesParts.push(`Timeline: ${m.timeline}`)
+    if (m.caller_notes) notesParts.push(m.caller_notes)
+
+    const EMPTY = () => ({ original_description: '', standardized_description: '', category: '', subcategory: '', service_type: 'labor', quantity: 1, unit_of_measure: 'each', amount: '' })
+    const services = (m.service_lines || []).length > 0
+      ? m.service_lines.map(sl => ({
+          original_description: sl.description || '',
+          standardized_description: sl.description || '',
+          category: '',
+          subcategory: '',
+          service_type: 'labor',
+          quantity: sl.quantity || 1,
+          unit_of_measure: sl.unit || 'each',
+          amount: '',
+        }))
+      : [EMPTY()]
+
+    const prefill = {
+      customer_id: customerId ? String(customerId) : null,
+      customer_name: lead.contact_name || '',
+      customer_phone: lead.from_number || '',
+      customer_address: m.address || '',
+      notes: notesParts.join('\n'),
+      services,
+    }
+    localStorage.setItem('bhs_estimate_prefill', JSON.stringify(prefill))
+
+    if (lead.status !== 'converted') {
+      const body = customerId
+        ? { customer_id: parseInt(customerId) }
+        : { name: lead.contact_name || lead.from_number }
+      await fetch(`/api/leads/${lead.id}/convert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    }
+
+    navigate('/estimate')
+  }
+
   return (
     <div className="max-w-2xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
@@ -228,49 +280,85 @@ export default function Leads() {
               {/* Expanded detail */}
               {expanded === lead.id && (
                 <div className="px-4 pb-4 space-y-3 border-t border-slate-100 pt-3">
-                  {/* Structured detail card — call (purple) or SMS (blue) */}
+                  {/* Structured detail card */}
                   {(() => {
                     const m = parseMeta(lead)
                     const isCall = lead.source === 'call'
-                    const hasStructured = m.service_requested || m.location || m.call_summary || m.caller_notes
-                    if (hasStructured) {
-                      const cardCls = isCall ? 'bg-purple-50' : 'bg-blue-50'
-                      const labelCls = isCall ? 'text-xs font-semibold text-purple-600 uppercase tracking-wide' : 'text-xs font-semibold text-blue-600 uppercase tracking-wide'
+                    const cardCls = isCall ? 'bg-purple-50' : 'bg-blue-50'
+                    const labelCls = isCall
+                      ? 'text-xs font-semibold text-purple-600 uppercase tracking-wide'
+                      : 'text-xs font-semibold text-blue-600 uppercase tracking-wide'
+                    const hasAny = (m.service_lines && m.service_lines.length > 0) ||
+                      m.address || m.access_notes || m.materials || m.measurements ||
+                      m.timeline || m.call_summary || m.caller_notes
+
+                    if (!hasAny) {
                       return (
-                        <div className={`${cardCls} rounded-xl p-3 space-y-2`}>
-                          {m.service_requested && (
-                            <div>
-                              <span className={labelCls}>Service Needed</span>
-                              <p className="text-sm text-slate-700 mt-0.5">{m.service_requested}</p>
-                            </div>
-                          )}
-                          {m.location && (
-                            <div>
-                              <span className={labelCls}>Location</span>
-                              <p className="text-sm text-slate-700 mt-0.5">{m.location}</p>
-                            </div>
-                          )}
-                          {m.call_summary && (
-                            <div>
-                              <span className={labelCls}>Call Summary</span>
-                              <p className="text-sm text-slate-700 mt-0.5">{m.call_summary}</p>
-                            </div>
-                          )}
-                          {m.caller_notes && (
-                            <div>
-                              <span className={labelCls}>Notes</span>
-                              <p className="text-sm text-slate-700 mt-0.5">{m.caller_notes}</p>
-                            </div>
-                          )}
-                          {!isCall && m.message_count > 1 && (
-                            <p className="text-xs text-slate-400 pt-1">{m.message_count} texts in this conversation</p>
-                          )}
+                        <div className="bg-slate-50 rounded-xl p-3">
+                          <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.message}</p>
                         </div>
                       )
                     }
+
                     return (
-                      <div className="bg-slate-50 rounded-xl p-3">
-                        <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.message}</p>
+                      <div className={`${cardCls} rounded-xl p-3 space-y-2`}>
+                        {m.service_lines && m.service_lines.length > 0 && (
+                          <div>
+                            <span className={labelCls}>Services</span>
+                            <ul className="mt-0.5 space-y-0.5">
+                              {m.service_lines.map((sl, i) => (
+                                <li key={i} className="text-sm text-slate-700">
+                                  • {sl.description}{sl.quantity && sl.quantity !== 1 ? ` — ${sl.quantity} ${sl.unit || ''}` : ''}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {m.address && (
+                          <div>
+                            <span className={labelCls}>Address</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.address}</p>
+                          </div>
+                        )}
+                        {m.access_notes && (
+                          <div>
+                            <span className={labelCls}>Access</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.access_notes}</p>
+                          </div>
+                        )}
+                        {m.materials && (
+                          <div>
+                            <span className={labelCls}>Materials / Specs</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.materials}</p>
+                          </div>
+                        )}
+                        {m.measurements && (
+                          <div>
+                            <span className={labelCls}>Measurements</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.measurements}</p>
+                          </div>
+                        )}
+                        {m.timeline && (
+                          <div>
+                            <span className={labelCls}>Timeline</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.timeline}</p>
+                          </div>
+                        )}
+                        {m.call_summary && (
+                          <div>
+                            <span className={labelCls}>Call Summary</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.call_summary}</p>
+                          </div>
+                        )}
+                        {m.caller_notes && (
+                          <div>
+                            <span className={labelCls}>Notes</span>
+                            <p className="text-sm text-slate-700 mt-0.5">{m.caller_notes}</p>
+                          </div>
+                        )}
+                        {!isCall && m.message_count > 1 && (
+                          <p className="text-xs text-slate-400 pt-1">{m.message_count} texts in this conversation</p>
+                        )}
                       </div>
                     )
                   })()}
@@ -338,12 +426,20 @@ export default function Leads() {
                   ) : (
                     <div className="flex gap-2 flex-wrap">
                       {lead.status !== 'converted' && (
-                        <button
-                          onClick={() => setConverting(lead.id)}
-                          className="flex-1 bg-green-600 text-white rounded-xl py-2.5 text-sm font-semibold"
-                        >
-                          Convert to Customer
-                        </button>
+                        <>
+                          <button
+                            onClick={() => setConverting(lead.id)}
+                            className="flex-1 bg-green-600 text-white rounded-xl py-2.5 text-sm font-semibold"
+                          >
+                            Add to Customers
+                          </button>
+                          <button
+                            onClick={() => createEstimate(lead)}
+                            className="flex-1 bg-blue-600 text-white rounded-xl py-2.5 text-sm font-semibold"
+                          >
+                            Create Estimate →
+                          </button>
+                        </>
                       )}
                       {lead.status === 'converted' && lead.customer_id && (
                         <a
