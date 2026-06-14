@@ -3487,69 +3487,48 @@ def webhook_sms():
 
 @app.route('/api/webhook/call', methods=['POST'])
 def webhook_call():
-    """Receive call summaries from Retell AI or bhs-memory-server."""
+    """Receive call summaries from Retell AI — save to leads and forward to bhs-memory-server."""
     token = request.args.get('token') or request.headers.get('X-Webhook-Token', '')
     if token != WEBHOOK_SECRET:
         return jsonify({'error': 'Unauthorized'}), 401
 
-    data = request.get_json(silent=True) or {}
+    # Capture raw bytes before parsing — required to forward intact for signature verification
+    raw_body = request.get_data()
+    retell_sig = request.headers.get('x-retell-signature', '')
 
-    # Handle raw Retell webhook format
+    data = json.loads(raw_body) if raw_body else {}
+
+    # Retell structure: { event, call: { from_number, call_analysis: { custom_analysis_data, call_summary } } }
     call = data.get('call', data)
     analysis = call.get('call_analysis', {})
     custom = analysis.get('custom_analysis_data', {})
 
-    # Extract fields — supports both Retell native and bhs-memory-server formats
-    from_number = (
-        call.get('from_number') or
-        data.get('caller_phone') or
-        data.get('from_number') or ''
-    ).strip()
+    from_number = (call.get('from_number') or data.get('from_number') or '').strip()
 
     contact_name = (
-        custom.get('caller_name') or
-        data.get('caller_name') or
-        data.get('contact_name') or ''
+        custom.get('caller_name') or data.get('caller_name') or ''
     ).strip() or None
 
-    service_requested = (
-        custom.get('service_requested') or
-        data.get('service_requested') or ''
-    ).strip()
+    # Actual field names from William agent: service_needed, job_location, caller_notes
+    service = (custom.get('service_needed') or custom.get('service_requested') or '').strip()
+    location = (custom.get('job_location') or custom.get('location') or '').strip()
+    call_summary = (analysis.get('call_summary') or '').strip()
+    caller_notes = (custom.get('caller_notes') or '').strip()
 
-    location = (
-        custom.get('location') or
-        data.get('location') or ''
-    ).strip()
-
-    call_summary = (
-        analysis.get('call_summary') or
-        data.get('call_summary') or
-        data.get('summary') or
-        call.get('transcript', '')[:500]
-    ).strip()
-
-    caller_notes = (
-        custom.get('caller_notes') or
-        data.get('caller_notes') or ''
-    ).strip()
-
-    received_at = data.get('call_date') or datetime.utcnow().isoformat()
-
-    # Build the message shown in the inbox
     parts = []
-    if service_requested:
-        parts.append(f"Service: {service_requested}")
-    if location:
-        parts.append(f"Location: {location}")
-    if call_summary:
-        parts.append(f"Summary: {call_summary}")
-    if caller_notes:
-        parts.append(f"Notes: {caller_notes}")
-    message = '\n'.join(parts) or call_summary or 'No details captured'
+    if service:       parts.append(f"Service: {service}")
+    if location:      parts.append(f"Location: {location}")
+    if call_summary:  parts.append(f"Summary: {call_summary}")
+    if caller_notes:  parts.append(f"Notes: {caller_notes}")
+    message = '\n'.join(parts) or 'No details captured'
+
+    received_at = (
+        datetime.utcfromtimestamp(call['end_timestamp'] / 1000).isoformat()
+        if call.get('end_timestamp') else datetime.utcnow().isoformat()
+    )
 
     meta = json.dumps({
-        'service_requested': service_requested,
+        'service_requested': service,
         'location': location,
         'call_summary': call_summary,
         'caller_notes': caller_notes,
@@ -3565,21 +3544,22 @@ def webhook_call():
     ''', (from_number, contact_name, message, received_at, customer_id, meta))
     lead_id = cursor.lastrowid
     conn.commit()
-
     lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
     conn.close()
 
-    # Forward raw payload to bhs-memory-server in background (fire-and-forget)
-    raw_payload = json.dumps(data).encode()
+    # Forward original raw bytes + Retell signature header so bhs-memory-server can verify
     def _forward():
         try:
-            req = urllib.request.Request(
+            fwd = urllib.request.Request(
                 BHS_MEMORY_WEBHOOK_URL,
-                data=raw_payload,
-                headers={'Content-Type': 'application/json'},
+                data=raw_body,
+                headers={
+                    'Content-Type': 'application/json',
+                    'x-retell-signature': retell_sig,
+                },
                 method='POST'
             )
-            urllib.request.urlopen(req, timeout=8)
+            urllib.request.urlopen(fwd, timeout=8)
         except Exception:
             pass
     _threading.Thread(target=_forward, daemon=True).start()
