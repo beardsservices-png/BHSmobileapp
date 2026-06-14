@@ -3461,9 +3461,53 @@ def _match_customer_by_phone(cursor, phone):
     return None
 
 
+def _extract_sms_fields(message_texts, api_key):
+    """Use Claude to extract structured fields from SMS conversation text."""
+    if not api_key or not message_texts:
+        return {}
+    conv = '\n'.join(f'- {t}' for t in message_texts if t)
+    prompt = f"""Extract structured info from this SMS conversation with a potential handyman customer.
+
+Messages:
+{conv}
+
+Return ONLY a JSON object, no explanation:
+{{
+  "service_requested": "what service or repair they need, or null",
+  "location": "address or location description, or null",
+  "caller_notes": "important details like timing, access, urgency, or null",
+  "contact_name": "their name if they mentioned it, or null"
+}}"""
+    try:
+        req_data = json.dumps({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 300,
+            'messages': [{'role': 'user', 'content': prompt}]
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=req_data,
+            headers={
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        text = result['content'][0]['text'].strip()
+        if '```' in text:
+            text = text.split('```')[1]
+            if text.startswith('json'):
+                text = text[4:]
+        return json.loads(text.strip())
+    except Exception:
+        return {}
+
+
 @app.route('/api/webhook/sms', methods=['POST'])
 def webhook_sms():
-    """Receive forwarded SMS from SMS Forwarder app."""
+    """Receive forwarded SMS — thread by phone number, extract structured fields via AI."""
     token = request.args.get('token') or request.headers.get('X-Webhook-Token', '')
     if token != WEBHOOK_SECRET:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -3477,20 +3521,73 @@ def webhook_sms():
     if not from_number or not message:
         return jsonify({'error': 'Missing from or message'}), 400
 
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
     conn = get_db()
     cursor = conn.cursor()
     customer_id = _match_customer_by_phone(cursor, from_number)
+    norm_from = _normalize_phone(from_number)
 
-    cursor.execute('''
-        INSERT INTO leads (source, from_number, contact_name, message, received_at, status, customer_id)
-        VALUES ('sms', ?, ?, ?, ?, 'new', ?)
-    ''', (from_number, contact_name, message, received_at, customer_id))
-    lead_id = cursor.lastrowid
-    conn.commit()
+    # Find existing active lead from same number
+    existing = None
+    cursor.execute(
+        "SELECT * FROM leads WHERE source = 'sms' AND status NOT IN ('dismissed', 'converted') ORDER BY created_at DESC LIMIT 20"
+    )
+    for row in cursor.fetchall():
+        rd = row_to_dict(row)
+        if _normalize_phone(rd.get('from_number', '')) == norm_from:
+            existing = rd
+            break
 
-    lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
-    conn.close()
-    return jsonify(lead), 201
+    if existing:
+        meta = {}
+        try:
+            meta = json.loads(existing.get('metadata') or '{}')
+        except Exception:
+            pass
+
+        messages = meta.get('messages', [])
+        if not messages and existing.get('message'):
+            messages = [{'text': existing['message'], 'received_at': existing.get('received_at', '')}]
+        messages.append({'text': message, 'received_at': received_at})
+
+        fields = _extract_sms_fields([m['text'] for m in messages], api_key)
+
+        meta.update({
+            'messages': messages,
+            'message_count': len(messages),
+            'service_requested': fields.get('service_requested') or meta.get('service_requested'),
+            'location': fields.get('location') or meta.get('location'),
+            'caller_notes': fields.get('caller_notes') or meta.get('caller_notes'),
+        })
+        resolved_name = existing.get('contact_name') or fields.get('contact_name') or contact_name
+
+        cursor.execute(
+            "UPDATE leads SET metadata = ?, message = ?, contact_name = ?, received_at = ?, status = 'new' WHERE id = ?",
+            (json.dumps(meta), message, resolved_name, received_at, existing['id'])
+        )
+        conn.commit()
+        lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (existing['id'],)).fetchone())
+        conn.close()
+        return jsonify(lead), 200
+    else:
+        fields = _extract_sms_fields([message], api_key)
+        resolved_name = contact_name or fields.get('contact_name')
+        meta = {
+            'messages': [{'text': message, 'received_at': received_at}],
+            'message_count': 1,
+            'service_requested': fields.get('service_requested'),
+            'location': fields.get('location'),
+            'caller_notes': fields.get('caller_notes'),
+        }
+        cursor.execute('''
+            INSERT INTO leads (source, from_number, contact_name, message, received_at, status, customer_id, metadata)
+            VALUES ('sms', ?, ?, ?, ?, 'new', ?, ?)
+        ''', (from_number, resolved_name, message, received_at, customer_id, json.dumps(meta)))
+        lead_id = cursor.lastrowid
+        conn.commit()
+        lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
+        conn.close()
+        return jsonify(lead), 201
 
 
 @app.route('/api/webhook/call', methods=['POST'])

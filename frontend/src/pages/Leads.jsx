@@ -51,6 +51,14 @@ export default function Leads() {
       .then(r => r.json())
       .then(data => { setLeads(data); setLoading(false) })
       .catch(() => setLoading(false))
+
+    const iv = setInterval(() => {
+      fetch(`/api/leads?status=${tab}`)
+        .then(r => r.json())
+        .then(setLeads)
+        .catch(() => {})
+    }, 15 * 60 * 1000)
+    return () => clearInterval(iv)
   }, [tab])
 
   function refresh() {
@@ -189,13 +197,9 @@ export default function Leads() {
                   {lead.contact_name && (
                     <div className="text-xs text-slate-500">{formatPhone(lead.from_number)}</div>
                   )}
-                  {lead.source === 'call' ? (
-                    <p className="text-sm text-slate-600 mt-0.5 line-clamp-2">
-                      {parseMeta(lead).service_requested || lead.message}
-                    </p>
-                  ) : (
-                    <p className="text-sm text-slate-600 mt-0.5 line-clamp-2">{lead.message}</p>
-                  )}
+                  <p className="text-sm text-slate-600 mt-0.5 line-clamp-2">
+                    {parseMeta(lead).service_requested || lead.message}
+                  </p>
                   <div className="flex flex-wrap gap-1 mt-1">
                     {lead.source === 'call' && (
                       <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">Call</span>
@@ -224,42 +228,52 @@ export default function Leads() {
               {/* Expanded detail */}
               {expanded === lead.id && (
                 <div className="px-4 pb-4 space-y-3 border-t border-slate-100 pt-3">
-                  {/* Full message / call detail */}
-                  {lead.source === 'call' ? (() => {
+                  {/* Structured detail card — call (purple) or SMS (blue) */}
+                  {(() => {
                     const m = parseMeta(lead)
+                    const isCall = lead.source === 'call'
+                    const hasStructured = m.service_requested || m.location || m.call_summary || m.caller_notes
+                    if (hasStructured) {
+                      const cardCls = isCall ? 'bg-purple-50' : 'bg-blue-50'
+                      const labelCls = isCall ? 'text-xs font-semibold text-purple-600 uppercase tracking-wide' : 'text-xs font-semibold text-blue-600 uppercase tracking-wide'
+                      return (
+                        <div className={`${cardCls} rounded-xl p-3 space-y-2`}>
+                          {m.service_requested && (
+                            <div>
+                              <span className={labelCls}>Service Needed</span>
+                              <p className="text-sm text-slate-700 mt-0.5">{m.service_requested}</p>
+                            </div>
+                          )}
+                          {m.location && (
+                            <div>
+                              <span className={labelCls}>Location</span>
+                              <p className="text-sm text-slate-700 mt-0.5">{m.location}</p>
+                            </div>
+                          )}
+                          {m.call_summary && (
+                            <div>
+                              <span className={labelCls}>Call Summary</span>
+                              <p className="text-sm text-slate-700 mt-0.5">{m.call_summary}</p>
+                            </div>
+                          )}
+                          {m.caller_notes && (
+                            <div>
+                              <span className={labelCls}>Notes</span>
+                              <p className="text-sm text-slate-700 mt-0.5">{m.caller_notes}</p>
+                            </div>
+                          )}
+                          {!isCall && m.message_count > 1 && (
+                            <p className="text-xs text-slate-400 pt-1">{m.message_count} texts in this conversation</p>
+                          )}
+                        </div>
+                      )
+                    }
                     return (
-                      <div className="bg-purple-50 rounded-xl p-3 space-y-2">
-                        {m.service_requested && (
-                          <div>
-                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Service Needed</span>
-                            <p className="text-sm text-slate-700 mt-0.5">{m.service_requested}</p>
-                          </div>
-                        )}
-                        {m.location && (
-                          <div>
-                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Location</span>
-                            <p className="text-sm text-slate-700 mt-0.5">{m.location}</p>
-                          </div>
-                        )}
-                        {m.call_summary && (
-                          <div>
-                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Call Summary</span>
-                            <p className="text-sm text-slate-700 mt-0.5">{m.call_summary}</p>
-                          </div>
-                        )}
-                        {m.caller_notes && (
-                          <div>
-                            <span className="text-xs font-semibold text-purple-600 uppercase tracking-wide">Caller Notes</span>
-                            <p className="text-sm text-slate-700 mt-0.5">{m.caller_notes}</p>
-                          </div>
-                        )}
+                      <div className="bg-slate-50 rounded-xl p-3">
+                        <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.message}</p>
                       </div>
                     )
-                  })() : (
-                    <div className="bg-slate-50 rounded-xl p-3">
-                      <p className="text-sm text-slate-700 whitespace-pre-wrap">{lead.message}</p>
-                    </div>
-                  )}
+                  })()}
 
                   {/* Notes */}
                   <div>
