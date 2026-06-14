@@ -118,6 +118,21 @@ def migrate_db():
     except:
         pass
 
+    # leads table — inbound calls/texts waiting to be actioned
+    cursor.execute('''CREATE TABLE IF NOT EXISTS leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT DEFAULT 'sms',
+        from_number TEXT,
+        contact_name TEXT,
+        message TEXT,
+        received_at TEXT,
+        status TEXT DEFAULT 'new',
+        customer_id INTEGER REFERENCES customers(id),
+        job_id INTEGER REFERENCES jobs(id),
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
     # payments table
     cursor.execute('''CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3399,6 +3414,161 @@ Return ONLY valid JSON."""
         return jsonify(json.loads(raw))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# LEADS — inbound SMS & call intake
+# ============================================================
+
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'WebhookSecret')
+
+
+def _normalize_phone(phone):
+    """Strip everything except digits, keep leading + for E.164."""
+    if not phone:
+        return None
+    digits = re.sub(r'\D', '', str(phone))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _match_customer_by_phone(cursor, phone):
+    """Return customer_id if we have a matching phone on file."""
+    if not phone:
+        return None
+    normalized = _normalize_phone(phone)
+    if not normalized:
+        return None
+    cursor.execute("SELECT id, phone FROM customers WHERE phone IS NOT NULL AND phone != ''")
+    for row in cursor.fetchall():
+        if _normalize_phone(row['phone']) == normalized:
+            return row['id']
+    return None
+
+
+@app.route('/api/webhook/sms', methods=['POST'])
+def webhook_sms():
+    """Receive forwarded SMS from SMS Forwarder app."""
+    token = request.args.get('token') or request.headers.get('X-Webhook-Token', '')
+    if token != WEBHOOK_SECRET:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True) or {}
+    from_number = str(data.get('from', '')).strip()
+    contact_name = str(data.get('contact', '')).strip() or None
+    message = str(data.get('message', '')).strip()
+    received_at = data.get('sentStamp') or data.get('receivedStamp') or datetime.utcnow().isoformat()
+
+    if not from_number or not message:
+        return jsonify({'error': 'Missing from or message'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    customer_id = _match_customer_by_phone(cursor, from_number)
+
+    cursor.execute('''
+        INSERT INTO leads (source, from_number, contact_name, message, received_at, status, customer_id)
+        VALUES ('sms', ?, ?, ?, ?, 'new', ?)
+    ''', (from_number, contact_name, message, received_at, customer_id))
+    lead_id = cursor.lastrowid
+    conn.commit()
+
+    lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
+    conn.close()
+    return jsonify(lead), 201
+
+
+@app.route('/api/leads', methods=['GET'])
+def get_leads():
+    status = request.args.get('status')
+    conn = get_db()
+    cursor = conn.cursor()
+    if status:
+        cursor.execute('''
+            SELECT l.*, c.name as customer_name
+            FROM leads l
+            LEFT JOIN customers c ON l.customer_id = c.id
+            WHERE l.status = ?
+            ORDER BY l.received_at DESC, l.created_at DESC
+        ''', (status,))
+    else:
+        cursor.execute('''
+            SELECT l.*, c.name as customer_name
+            FROM leads l
+            LEFT JOIN customers c ON l.customer_id = c.id
+            ORDER BY l.received_at DESC, l.created_at DESC
+        ''')
+    leads = rows_to_list(cursor.fetchall())
+    conn.close()
+    return jsonify(leads)
+
+
+@app.route('/api/leads/<int:lead_id>', methods=['PUT'])
+def update_lead(lead_id):
+    data = request.get_json() or {}
+    allowed = {'status', 'notes', 'customer_id', 'job_id', 'contact_name'}
+    updates = {k: v for k, v in data.items() if k in allowed}
+    if not updates:
+        return jsonify({'error': 'Nothing to update'}), 400
+    conn = get_db()
+    set_clause = ', '.join(f'{k} = ?' for k in updates)
+    conn.execute(f'UPDATE leads SET {set_clause} WHERE id = ?', list(updates.values()) + [lead_id])
+    conn.commit()
+    lead = row_to_dict(conn.execute(
+        'SELECT l.*, c.name as customer_name FROM leads l LEFT JOIN customers c ON l.customer_id = c.id WHERE l.id = ?',
+        (lead_id,)).fetchone())
+    conn.close()
+    return jsonify(lead)
+
+
+@app.route('/api/leads/<int:lead_id>/dismiss', methods=['POST'])
+def dismiss_lead(lead_id):
+    conn = get_db()
+    conn.execute("UPDATE leads SET status = 'dismissed' WHERE id = ?", (lead_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/leads/<int:lead_id>/convert', methods=['POST'])
+def convert_lead(lead_id):
+    """Convert a lead into a customer note or new customer record."""
+    data = request.get_json() or {}
+    conn = get_db()
+    cursor = conn.cursor()
+
+    lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
+    if not lead:
+        conn.close()
+        return jsonify({'error': 'Lead not found'}), 404
+
+    customer_id = data.get('customer_id') or lead.get('customer_id')
+
+    # Create new customer if not linked
+    if not customer_id:
+        name = data.get('name') or lead.get('contact_name') or lead.get('from_number') or 'Unknown'
+        cursor.execute(
+            'INSERT INTO customers (name, phone, notes) VALUES (?, ?, ?)',
+            (name, lead.get('from_number'), f'Created from SMS lead: {lead.get("message", "")[:200]}')
+        )
+        customer_id = cursor.lastrowid
+
+    conn.execute(
+        "UPDATE leads SET status = 'converted', customer_id = ? WHERE id = ?",
+        (customer_id, lead_id)
+    )
+    conn.commit()
+    customer = row_to_dict(cursor.execute('SELECT * FROM customers WHERE id = ?', (customer_id,)).fetchone())
+    conn.close()
+    return jsonify({'success': True, 'customer': customer, 'customer_id': customer_id})
+
+
+@app.route('/api/leads/<int:lead_id>', methods=['DELETE'])
+def delete_lead(lead_id):
+    conn = get_db()
+    conn.execute('DELETE FROM leads WHERE id = ?', (lead_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
 
 
 # ============================================================
