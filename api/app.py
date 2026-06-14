@@ -3527,7 +3527,47 @@ def webhook_sms():
     customer_id = _match_customer_by_phone(cursor, from_number)
     norm_from = _normalize_phone(from_number)
 
-    # Find existing active lead from same number
+    # If this is an existing customer with no active lead, append to their profile notes
+    if customer_id:
+        active_lead = None
+        open_rows = conn.execute(
+            "SELECT * FROM leads WHERE source = 'sms' AND status NOT IN ('dismissed', 'converted') ORDER BY created_at DESC LIMIT 20"
+        ).fetchall()
+        for row in open_rows:
+            rd = row_to_dict(row)
+            if _normalize_phone(rd.get('from_number', '')) == norm_from:
+                active_lead = rd
+                break
+
+        if not active_lead:
+            # Existing customer, no open lead — append to customer notes
+            fields = _extract_sms_fields([message], api_key)
+            try:
+                dt = datetime.fromisoformat(received_at.replace('Z', ''))
+            except Exception:
+                dt = datetime.utcnow()
+            date_str = dt.strftime('%b %d')
+            note_parts = [f'[{date_str} Text] {message}']
+            extras = []
+            if fields.get('service_requested'):
+                extras.append(f"Service: {fields['service_requested']}")
+            if fields.get('location'):
+                extras.append(f"Location: {fields['location']}")
+            if fields.get('caller_notes'):
+                extras.append(f"Notes: {fields['caller_notes']}")
+            if extras:
+                note_parts.append(' | '.join(extras))
+            new_note_line = '\n'.join(note_parts)
+
+            cust = row_to_dict(cursor.execute('SELECT notes FROM customers WHERE id = ?', (customer_id,)).fetchone())
+            existing_notes = (cust.get('notes') or '').strip()
+            updated_notes = (existing_notes + '\n\n' + new_note_line).strip() if existing_notes else new_note_line
+            cursor.execute('UPDATE customers SET notes = ? WHERE id = ?', (updated_notes, customer_id))
+            conn.commit()
+            conn.close()
+            return jsonify({'routed': 'customer_notes', 'customer_id': customer_id}), 200
+
+    # Find existing active lead from same number (unknown caller or lead still open)
     existing = None
     cursor.execute(
         "SELECT * FROM leads WHERE source = 'sms' AND status NOT IN ('dismissed', 'converted') ORDER BY created_at DESC LIMIT 20"
