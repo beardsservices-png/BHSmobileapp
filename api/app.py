@@ -3425,7 +3425,10 @@ Return ONLY valid JSON."""
 # LEADS — inbound SMS & call intake
 # ============================================================
 
+import threading as _threading
+
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'WebhookSecret')
+BHS_MEMORY_WEBHOOK_URL = os.environ.get('BHS_MEMORY_WEBHOOK_URL', 'https://bhs-memory-server-production-7ff0.up.railway.app')
 
 
 def _normalize_phone(phone):
@@ -3565,6 +3568,22 @@ def webhook_call():
 
     lead = row_to_dict(cursor.execute('SELECT * FROM leads WHERE id = ?', (lead_id,)).fetchone())
     conn.close()
+
+    # Forward raw payload to bhs-memory-server in background (fire-and-forget)
+    raw_payload = json.dumps(data).encode()
+    def _forward():
+        try:
+            req = urllib.request.Request(
+                BHS_MEMORY_WEBHOOK_URL,
+                data=raw_payload,
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            urllib.request.urlopen(req, timeout=8)
+        except Exception:
+            pass
+    _threading.Thread(target=_forward, daemon=True).start()
+
     return jsonify(lead), 201
 
 
