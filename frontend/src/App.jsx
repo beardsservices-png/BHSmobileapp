@@ -13,10 +13,12 @@ import Reports from './pages/Reports'
 import DayWrapup from './pages/DayWrapup'
 import Clock from './pages/Clock'
 import Settings from './pages/Settings'
+import Leads from './pages/Leads'
 
 const LS_CLOCK = 'bhs_clock_v1'
 
 const ALL_MORE_ITEMS = [
+  { key: 'leads',          to: '/leads',           label: 'Leads Inbox' },
   { key: 'estimate',       to: '/estimate',       label: '+ Estimate' },
   { key: 'customers',      to: '/customers',      label: 'Customers' },
   { key: 'filing-cabinet', to: '/filing-cabinet', label: 'Filing Cabinet' },
@@ -189,6 +191,10 @@ function App() {
                   `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-teal-100 text-teal-700' : 'text-slate-600 hover:bg-slate-100'}`}>
                   Trips
                 </NavLink>
+                <NavLink to="/leads" className={({ isActive }) =>
+                  `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-blue-100 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+                  Leads
+                </NavLink>
                 <NavLink to="/reports" className={({ isActive }) =>
                   `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}>
                   Reports
@@ -215,6 +221,7 @@ function App() {
             <Route path="/trips" element={<Trips />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/day-wrapup" element={<DayWrapup />} />
+            <Route path="/leads" element={<Leads />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
