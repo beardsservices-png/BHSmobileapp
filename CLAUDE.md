@@ -1,7 +1,8 @@
 # Beard's Home Services - Business App
 
 **Owner:** Brian (non-technical). Handyman business in Mountain Home, AR.  
-**Last Updated:** 2026-06-14
+**Last Updated:** 2026-06-14  
+**App version:** Phase 5 active — Leads inbox + SMS/Call integration shipped
 
 ---
 
@@ -10,7 +11,7 @@
 ```
 BHSmobileapp/
 ├── api/
-│   ├── app.py                    # Flask API (3,400+ lines, 60 endpoints), port 5000
+│   ├── app.py                    # Flask API (3,680+ lines, 65+ endpoints), port 5000
 │   ├── models.py                 # Legacy SQLAlchemy models (NOT used — ignore)
 │   ├── seed_data.py              # Historical data loader
 │   └── .env                      # Local environment variables
@@ -48,7 +49,8 @@ BHSmobileapp/
 │   │       ├── DayWrapup.jsx     # End-of-day summary & time aggregation
 │   │       ├── Reports.jsx       # Charts: revenue by month/category, margins
 │   │       ├── PrintView.jsx     # Printable invoice/estimate
-│   │       └── Settings.jsx      # Toggle "More" menu items
+│   │       ├── Settings.jsx      # Toggle "More" menu items
+│   │       └── Leads.jsx         # SMS/call intake inbox (Retell AI + SMS Forwarder)
 │   ├── package.json
 │   ├── vite.config.js            # Dev server port 5173, proxies /api → :5000
 │   └── index.html
@@ -203,13 +205,17 @@ Push to Railway via Docker. The Dockerfile builds the React frontend into `dist/
 | Column | Type | Notes |
 |--------|------|-------|
 | id | INT PK | |
-| job_id | FK → jobs | |
+| job_id | FK → jobs | NULL = overhead expense not tied to a job |
 | customer_id | FK → customers | |
 | description | TEXT | |
 | cost | REAL | |
 | vendor | TEXT | |
 | receipt_path | TEXT | |
 | expense_date | DATE | |
+| expense_category | TEXT | e.g., `'Materials & Supplies'`, `'Fuel'`, `'Tools'` |
+| is_overhead | INT | 1 = business overhead, 0 = job-specific material |
+| payment_method | TEXT | `'cash'`, `'card'`, etc. |
+| notes | TEXT | |
 | source | TEXT | Tracks entry method |
 | created_at | TIMESTAMP | |
 
@@ -220,6 +226,7 @@ Push to Railway via Docker. The Dockerfile builds the React frontend into `dist/
 | name | TEXT UNIQUE | e.g., `"Deck Repair & Restoration Labor"` |
 | description | TEXT | |
 | is_labor | INT | 1 = labor income, 0 = materials passthrough |
+| parent_id | INT | FK → service_categories.id (optional subcategory hierarchy) |
 
 **19 labor categories + 1 materials.** Examples: General Handyman Labor, Deck Construction/Repair, Fence, Flooring, Concrete, Painting/Staining, Bathroom/Kitchen Remodel, Door/Window, Tile, Plumbing, Gutter & Roofing, Landscaping, Outdoor Structure, Demolition, Asphalt & Paving, Screen & Enclosure, Appliance Installation, Materials.
 
@@ -262,6 +269,22 @@ Push to Railway via Docker. The Dockerfile builds the React frontend into `dist/
 | payment_date | DATE | |
 | payment_method | TEXT | `'cash'`, `'check'`, `'ACH'`, etc. |
 | memo | TEXT | |
+
+#### `leads` (inbound SMS/call inbox)
+| Column | Type | Notes |
+|--------|------|-------|
+| id | INT PK | |
+| source | TEXT | `'sms'` or `'call'` |
+| from_number | TEXT | Caller/sender phone number |
+| contact_name | TEXT | Parsed or matched name |
+| message | TEXT | SMS body or call transcript/summary |
+| received_at | TEXT | Timestamp of inbound message |
+| status | TEXT | `'new'`, `'read'`, `'converted'`, `'dismissed'` |
+| customer_id | FK → customers | Set when lead is matched/converted |
+| job_id | FK → jobs | Optionally linked to a job |
+| notes | TEXT | Brian's notes on the lead |
+| metadata | TEXT | JSON blob (Retell AI call analysis: service requested, urgency, etc.) |
+| created_at | TIMESTAMP | |
 
 ---
 
@@ -358,6 +381,17 @@ GET    /api/trips/summary               # Mileage totals by period
 DELETE /api/payments/<id>               # Remove payment record
 ```
 
+### Leads (SMS/Call Inbox)
+```
+GET    /api/leads                       # List leads, filterable by ?status=new|read|converted|dismissed
+PUT    /api/leads/<id>                  # Update lead (status, notes, customer_id, contact_name)
+POST   /api/leads/<id>/dismiss          # Mark lead dismissed
+POST   /api/leads/<id>/convert          # Convert to customer (existing or new)
+DELETE /api/leads/<id>                  # Delete lead
+POST   /api/webhook/sms                 # Receive forwarded SMS (SMS Forwarder app)
+POST   /api/webhook/call                # Receive call summary (Retell AI)
+```
+
 ### Admin & Import
 ```
 POST   /api/day-wrapup                  # End-of-day processing (time aggregation)
@@ -389,8 +423,11 @@ Mobile-first responsive design. Bottom navigation on small screens; top nav logi
 | Reports | `/reports` | Charts: revenue by month/category, margins |
 | Print View | `/print` | Printable invoice/estimate |
 | Settings | `/settings` | Toggle "More" menu items |
+| Leads | `/leads` | SMS/call intake inbox — new leads from SMS Forwarder + Retell AI |
 
-**Bottom Nav items (always visible):** Dashboard, Clock, More (configurable via Settings), Settings.
+**Bottom Nav items (always visible):** Dashboard, Clock, Expense, Day Wrap-Up, More (configurable via Settings).
+
+**More menu** (items configurable in Settings): Filing Cabinet, Jobs, Customers, Time Entry, Estimate, Trips, Leads, Reports.
 
 **Frontend state:** Uses React hooks + `localStorage` for app settings and clock state. No Redux/Zustand.
 
@@ -433,6 +470,13 @@ After a time entry is saved, the UI suggests logging a trip if the customer has 
 - `data_status='incomplete'` on a job = orphaned time entries with no matching invoice
 - `cya_notes` column = "cover your ass" notes for tricky customer situations
 - All import scripts are idempotent (safe to re-run; duplicates checked)
+
+### Leads / SMS-Call Intake
+- **SMS Forwarder app** on Brian's phone posts incoming texts to `POST /api/webhook/sms` with a token for auth.
+- **Retell AI** posts call summaries (JSON) to `POST /api/webhook/call`; `metadata` stores the parsed analysis (service requested, urgency, caller location, etc.).
+- Leads are matched to existing customers by phone number normalization (strips `+1`, spaces, dashes).
+- `status` flow: `new` → `read` → `converted` (linked to customer) or `dismissed`.
+- Converting a lead creates/updates a customer record and optionally leaves a note.
 
 ### Invoice Number Formats
 - Old format: `BHS` + 6-digit date → `BHS240110` (legacy edge case)
@@ -526,7 +570,7 @@ Service line format in text: `Description  Qty  $Price  [$Discount]  *?$Amount`
 | Phase 2 | ✅ Done | Flask API + React frontend connected |
 | Phase 3 | ✅ Done | Estimates, Filing Cabinet, PrintView |
 | Phase 4 | ✅ Done | Google Maps Timeline import + GPS time clock + mileage |
-| Phase 5 | 🔄 Active | Receipt scanning + P&L reports + advanced insights |
+| Phase 5 | 🔄 Active | Receipt scanning + P&L reports + advanced insights + Leads inbox (shipped) |
 | Phase 6 | 📋 Planned | Local deployment polish, mobile PWA, offline support |
 
 ---
