@@ -3428,7 +3428,7 @@ Return ONLY valid JSON."""
 import threading as _threading
 
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'WebhookSecret')
-BHS_MEMORY_WEBHOOK_URL = os.environ.get('BHS_MEMORY_WEBHOOK_URL', 'https://bhs-memory-server-production-7ff0.up.railway.app')
+BHS_MEMORY_WEBHOOK_URL = os.environ.get('BHS_MEMORY_WEBHOOK_URL', 'https://bhs-memory-server-production-7ff0.up.railway.app/webhook')
 
 
 def _normalize_phone(phone):
