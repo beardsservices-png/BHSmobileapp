@@ -480,7 +480,7 @@ export default function Leads() {
             {window.location.origin}/api/webhook/sms?token=WebhookSecret
           </code>
           <code className="block mt-1 bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700">
-            {'{"from":"[from]","contact":"[contact]","message":"[message]"}'}
+            {'{"from":"%pni%","contact":"%ct%","message":"%mb%"}'}
           </code>
         </div>
         <div>
