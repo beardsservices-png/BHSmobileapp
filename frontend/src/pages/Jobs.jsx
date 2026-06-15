@@ -83,7 +83,7 @@ export default function Jobs() {
 
       {/* Jobs table */}
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="grid grid-cols-12 px-5 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
+        <div className="hidden md:grid grid-cols-12 px-5 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100 bg-gray-50">
           <div className="col-span-3">Customer</div>
           <div className="col-span-2">Invoice #</div>
           <div className="col-span-2">Date</div>
@@ -91,30 +91,32 @@ export default function Jobs() {
           <div className="col-span-2 text-right">Total</div>
           <div className="col-span-1">Status</div>
         </div>
-        <div className="divide-y divide-gray-50">
+        <div className="divide-y divide-gray-100">
           {filtered.map(job => (
             <div
               key={job.id}
               onClick={() => navigate(`/filing-cabinet?job=${job.id}`)}
-              className="grid grid-cols-12 px-5 py-3 hover:bg-gray-50 cursor-pointer items-center"
+              className="cursor-pointer hover:bg-gray-50 px-4 py-3 md:px-5 md:grid md:grid-cols-12 md:items-center"
             >
-              <div className="col-span-3 font-medium text-gray-900 text-sm truncate pr-2">
-                {job.customer || '—'}
+              {/* Mobile card layout */}
+              <div className="md:hidden">
+                <div className="flex items-start justify-between gap-2">
+                  <span className="font-semibold text-gray-900 text-sm">{job.customer || '—'}</span>
+                  <StatusBadge status={job.status} />
+                </div>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-xs text-gray-400">{job.invoice_id || `#${job.id}`} · {job.start_date || '—'}</span>
+                  <span className="text-sm font-semibold text-gray-900">{fmt((job.total_labor || 0) + (job.total_materials || 0))}</span>
+                </div>
               </div>
-              <div className="col-span-2 text-sm text-gray-600">
-                {job.invoice_id || `#${job.id}`}
-              </div>
-              <div className="col-span-2 text-sm text-gray-500">
-                {job.start_date || '—'}
-              </div>
-              <div className="col-span-2 text-right text-sm text-gray-700">
-                {fmt(job.total_labor)}
-              </div>
-              <div className="col-span-2 text-right text-sm font-semibold text-gray-900">
-                {fmt((job.total_labor || 0) + (job.total_materials || 0))}
-              </div>
-              <div className="col-span-1">
-                <StatusBadge status={job.status} />
+              {/* Desktop table layout */}
+              <div className="hidden md:contents">
+                <div className="col-span-3 font-medium text-gray-900 text-sm truncate pr-2">{job.customer || '—'}</div>
+                <div className="col-span-2 text-sm text-gray-600">{job.invoice_id || `#${job.id}`}</div>
+                <div className="col-span-2 text-sm text-gray-500">{job.start_date || '—'}</div>
+                <div className="col-span-2 text-right text-sm text-gray-700">{fmt(job.total_labor)}</div>
+                <div className="col-span-2 text-right text-sm font-semibold text-gray-900">{fmt((job.total_labor || 0) + (job.total_materials || 0))}</div>
+                <div className="col-span-1"><StatusBadge status={job.status} /></div>
               </div>
             </div>
           ))}
