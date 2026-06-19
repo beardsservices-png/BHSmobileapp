@@ -14,6 +14,7 @@ import DayWrapup from './pages/DayWrapup'
 import Clock from './pages/Clock'
 import Settings from './pages/Settings'
 import Leads from './pages/Leads'
+import JazzyPay from './pages/JazzyPay'
 
 const LS_CLOCK = 'bhs_clock_v1'
 
@@ -26,6 +27,7 @@ const ALL_MORE_ITEMS = [
   { key: 'time',           to: '/time',           label: '+ Time Entry' },
   { key: 'trips',          to: '/trips',          label: 'Trips' },
   { key: 'reports',        to: '/reports',        label: 'Reports' },
+  { key: 'jazzy-pay',      to: '/jazzy-pay',      label: 'Jazzlyn Pay' },
 ]
 
 function getHidden() {
@@ -203,6 +205,10 @@ function App() {
                   `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-purple-100 text-purple-700' : 'bg-purple-50 text-purple-600 hover:bg-purple-100'}`}>
                   Day Wrap-Up
                 </NavLink>
+                <NavLink to="/jazzy-pay" className={({ isActive }) =>
+                  `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-pink-100 text-pink-700' : 'bg-pink-50 text-pink-600 hover:bg-pink-100'}`}>
+                  Jazzlyn Pay
+                </NavLink>
               </div>
             </div>
           </div>
@@ -222,6 +228,7 @@ function App() {
             <Route path="/reports" element={<Reports />} />
             <Route path="/day-wrapup" element={<DayWrapup />} />
             <Route path="/leads" element={<Leads />} />
+            <Route path="/jazzy-pay" element={<JazzyPay />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

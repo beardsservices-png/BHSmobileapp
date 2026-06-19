@@ -176,6 +176,76 @@ def migrate_db():
     except Exception:
         pass
 
+    # ── Jazzlyn Pay ────────────────────────────────────────────────────────────
+
+    # Service items catalog — pre-defined tasks with agreed rates
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jazzy_service_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        default_rate REAL NOT NULL,
+        category TEXT DEFAULT 'General',
+        sort_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # Seed default service items (safe to re-run — INSERT OR IGNORE)
+    _seed_items = [
+        ('Facebook Post (Create & Schedule)', 4.00,  'Social Media',    10),
+        ('GMB Business Post',                 4.00,  'Social Media',    20),
+        ('Instagram Post',                    4.00,  'Social Media',    30),
+        ('Lead Follow-Up (Text/Message)',      3.00,  'Lead Management', 10),
+        ('Lead Follow-Up (Phone Call)',        5.00,  'Lead Management', 20),
+        ('Review Response (Google/Facebook)',  2.00,  'Lead Management', 30),
+        ('Estimate Follow-Up',                4.00,  'Lead Management', 40),
+        ('Appointment Scheduled',             8.00,  'Job Conversion',  10),
+        ('Job Closed - Small (under $500)',   15.00,  'Job Conversion',  20),
+        ('Job Closed - Medium ($500-$2000)', 35.00,  'Job Conversion',  30),
+        ('Job Closed - Large ($2000+)',       75.00,  'Job Conversion',  40),
+        ('General Admin Task',                5.00,  'Admin',           10),
+        ('Research & Pricing',                8.00,  'Admin',           20),
+        ('Customer Communication (Email)',    3.00,  'Admin',           30),
+        ('Inbox / Message Monitoring (1 hr)', 8.00,  'Admin',           40),
+    ]
+    for _name, _rate, _cat, _ord in _seed_items:
+        try:
+            cursor.execute(
+                'INSERT OR IGNORE INTO jazzy_service_items (name, default_rate, category, sort_order) VALUES (?, ?, ?, ?)',
+                (_name, _rate, _cat, _ord)
+            )
+        except Exception:
+            pass
+
+    # Jazzlyn's invoices to Brian
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jazzy_invoices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_number TEXT UNIQUE,
+        status TEXT DEFAULT 'draft',
+        total_amount REAL DEFAULT 0,
+        notes TEXT,
+        submitted_at TEXT,
+        paid_at TEXT,
+        paid_notes TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # Line items on each invoice
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jazzy_invoice_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_id INTEGER NOT NULL REFERENCES jazzy_invoices(id),
+        service_item_id INTEGER REFERENCES jazzy_service_items(id),
+        description TEXT NOT NULL,
+        qty INTEGER DEFAULT 1,
+        rate REAL NOT NULL,
+        line_total REAL NOT NULL,
+        assignment_type TEXT DEFAULT 'business',
+        job_ref TEXT,
+        notes TEXT,
+        is_complete INTEGER DEFAULT 1,
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
     conn.commit()
     conn.close()
 
@@ -3895,6 +3965,258 @@ def delete_lead(lead_id):
     conn.commit()
     conn.close()
     return jsonify({'success': True})
+
+
+# ============================================================
+# JAZZY PAY — Jazzlyn's work invoice system
+# ============================================================
+
+@app.route('/api/jazzy/service-items', methods=['GET'])
+def list_jazzy_service_items():
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT * FROM jazzy_service_items WHERE is_active = 1 ORDER BY category, sort_order, name'
+    ).fetchall()
+    conn.close()
+    return jsonify(rows_to_list(rows))
+
+
+@app.route('/api/jazzy/service-items', methods=['POST'])
+def create_jazzy_service_item():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    rate = data.get('default_rate')
+    if not name or rate is None:
+        return jsonify({'error': 'name and default_rate required'}), 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO jazzy_service_items (name, default_rate, category, sort_order) VALUES (?, ?, ?, ?)',
+        (name, float(rate), data.get('category', 'General'), int(data.get('sort_order', 0)))
+    )
+    item_id = cursor.lastrowid
+    conn.commit()
+    row = conn.execute('SELECT * FROM jazzy_service_items WHERE id = ?', (item_id,)).fetchone()
+    conn.close()
+    return jsonify(row_to_dict(row)), 201
+
+
+@app.route('/api/jazzy/service-items/<int:item_id>', methods=['PUT'])
+def update_jazzy_service_item(item_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    cursor = conn.cursor()
+    item = row_to_dict(cursor.execute('SELECT * FROM jazzy_service_items WHERE id = ?', (item_id,)).fetchone())
+    if not item:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    fields, params = [], []
+    for col in ('name', 'category', 'sort_order', 'is_active'):
+        if col in data:
+            fields.append(f'{col} = ?')
+            params.append(data[col])
+    if 'default_rate' in data:
+        fields.append('default_rate = ?')
+        params.append(float(data['default_rate']))
+    if fields:
+        params.append(item_id)
+        conn.execute(f'UPDATE jazzy_service_items SET {", ".join(fields)} WHERE id = ?', params)
+        conn.commit()
+    row = conn.execute('SELECT * FROM jazzy_service_items WHERE id = ?', (item_id,)).fetchone()
+    conn.close()
+    return jsonify(row_to_dict(row))
+
+
+@app.route('/api/jazzy/service-items/<int:item_id>', methods=['DELETE'])
+def delete_jazzy_service_item(item_id):
+    conn = get_db()
+    conn.execute('UPDATE jazzy_service_items SET is_active = 0 WHERE id = ?', (item_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+def _next_jazzy_invoice_number(cursor):
+    prefix = datetime.now().strftime('JBHS-%Y%m-')
+    existing = cursor.execute(
+        "SELECT invoice_number FROM jazzy_invoices WHERE invoice_number LIKE ? ORDER BY invoice_number DESC LIMIT 1",
+        (prefix + '%',)
+    ).fetchone()
+    if existing:
+        try:
+            last_num = int(existing['invoice_number'].split('-')[-1])
+        except (ValueError, IndexError):
+            last_num = 0
+        return f'{prefix}{last_num + 1:02d}'
+    return f'{prefix}01'
+
+
+def _insert_lines(cursor, invoice_id, lines):
+    total = 0.0
+    for i, line in enumerate(lines):
+        qty = max(1, int(line.get('qty') or 1))
+        rate = float(line.get('rate') or 0)
+        line_total = qty * rate
+        total += line_total
+        cursor.execute(
+            '''INSERT INTO jazzy_invoice_lines
+               (invoice_id, service_item_id, description, qty, rate, line_total,
+                assignment_type, job_ref, notes, is_complete, sort_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                invoice_id,
+                int(line['service_item_id']) if line.get('service_item_id') else None,
+                (line.get('description') or '').strip(),
+                qty, rate, line_total,
+                line.get('assignment_type', 'business'),
+                (line.get('job_ref') or '').strip(),
+                (line.get('notes') or '').strip(),
+                1 if line.get('is_complete', True) else 0,
+                i,
+            )
+        )
+    return total
+
+
+@app.route('/api/jazzy/invoices', methods=['GET'])
+def list_jazzy_invoices():
+    conn = get_db()
+    rows = conn.execute('SELECT * FROM jazzy_invoices ORDER BY created_at DESC').fetchall()
+    conn.close()
+    return jsonify(rows_to_list(rows))
+
+
+@app.route('/api/jazzy/invoices', methods=['POST'])
+def create_jazzy_invoice():
+    data = request.get_json() or {}
+    lines = data.get('lines', [])
+    status = data.get('status', 'draft')
+    if status not in ('draft', 'submitted'):
+        status = 'draft'
+
+    conn = get_db()
+    cursor = conn.cursor()
+    invoice_number = _next_jazzy_invoice_number(cursor)
+
+    submitted_at = datetime.now().isoformat() if status == 'submitted' else None
+    cursor.execute(
+        'INSERT INTO jazzy_invoices (invoice_number, status, total_amount, notes, submitted_at) VALUES (?, ?, 0, ?, ?)',
+        (invoice_number, status, (data.get('notes') or '').strip(), submitted_at)
+    )
+    invoice_id = cursor.lastrowid
+    total = _insert_lines(cursor, invoice_id, lines)
+    cursor.execute('UPDATE jazzy_invoices SET total_amount = ? WHERE id = ?', (total, invoice_id))
+
+    conn.commit()
+    invoice = row_to_dict(cursor.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    conn.close()
+    return jsonify(invoice), 201
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>', methods=['GET'])
+def get_jazzy_invoice(invoice_id):
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    invoice['lines'] = rows_to_list(conn.execute(
+        'SELECT * FROM jazzy_invoice_lines WHERE invoice_id = ? ORDER BY sort_order, id',
+        (invoice_id,)
+    ).fetchall())
+    conn.close()
+    return jsonify(invoice)
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>', methods=['PUT'])
+def update_jazzy_invoice(invoice_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    cursor = conn.cursor()
+    invoice = row_to_dict(cursor.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] == 'paid':
+        conn.close()
+        return jsonify({'error': 'Cannot edit a paid invoice'}), 400
+
+    lines = data.get('lines')
+    notes = data.get('notes', invoice.get('notes', ''))
+
+    if lines is not None:
+        cursor.execute('DELETE FROM jazzy_invoice_lines WHERE invoice_id = ?', (invoice_id,))
+        total = _insert_lines(cursor, invoice_id, lines)
+        cursor.execute('UPDATE jazzy_invoices SET total_amount = ?, notes = ? WHERE id = ?', (total, notes, invoice_id))
+    else:
+        cursor.execute('UPDATE jazzy_invoices SET notes = ? WHERE id = ?', (notes, invoice_id))
+
+    conn.commit()
+    invoice = row_to_dict(cursor.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    invoice['lines'] = rows_to_list(cursor.execute(
+        'SELECT * FROM jazzy_invoice_lines WHERE invoice_id = ? ORDER BY sort_order, id',
+        (invoice_id,)
+    ).fetchall())
+    conn.close()
+    return jsonify(invoice)
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>', methods=['DELETE'])
+def delete_jazzy_invoice(invoice_id):
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] == 'paid':
+        conn.close()
+        return jsonify({'error': 'Cannot delete a paid invoice'}), 400
+    conn.execute('DELETE FROM jazzy_invoice_lines WHERE invoice_id = ?', (invoice_id,))
+    conn.execute('DELETE FROM jazzy_invoices WHERE id = ?', (invoice_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>/submit', methods=['POST'])
+def submit_jazzy_invoice(invoice_id):
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] != 'draft':
+        conn.close()
+        return jsonify({'error': 'Only draft invoices can be submitted'}), 400
+    conn.execute(
+        "UPDATE jazzy_invoices SET status = 'submitted', submitted_at = ? WHERE id = ?",
+        (datetime.now().isoformat(), invoice_id)
+    )
+    conn.commit()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    conn.close()
+    return jsonify(invoice)
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>/mark-paid', methods=['POST'])
+def mark_jazzy_invoice_paid(invoice_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] == 'paid':
+        conn.close()
+        return jsonify({'error': 'Already marked paid'}), 400
+    conn.execute(
+        "UPDATE jazzy_invoices SET status = 'paid', paid_at = ?, paid_notes = ? WHERE id = ?",
+        (datetime.now().isoformat(), (data.get('paid_notes') or '').strip(), invoice_id)
+    )
+    conn.commit()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    conn.close()
+    return jsonify(invoice)
 
 
 # ============================================================
