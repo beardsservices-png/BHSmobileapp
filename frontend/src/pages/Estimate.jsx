@@ -163,9 +163,9 @@ export default function Estimate() {
   const [customers, setCustomers]       = useState([])
   const [categories, setCategories]     = useState([])
   const [pricingHints, setPricingHints] = useState({})
-  const [saving, setSaving]             = useState(false)
-  const [openEstimates, setOpenEstimates] = useState([])
-  const [closeModal, setCloseModal]     = useState(null) // est object or null
+  const [saving, setSaving]               = useState(false)
+  const [pipelineEstimates, setPipelineEstimates] = useState([])
+  const [closeModal, setCloseModal]       = useState(null) // est object or null
 
   // New-customer inline form
   const [showNewCust, setShowNewCust]   = useState(false)
@@ -217,14 +217,26 @@ export default function Estimate() {
       setCustomers((Array.isArray(custData) ? custData : []).filter(c => !c.name.startsWith('_')))
       setCategories(Array.isArray(catData) ? catData : [])
       setPricingHints(priceData || {})
-      setOpenEstimates(estData.estimates || [])
+      setPipelineEstimates(estData.estimates || [])
     })
   }, [])
 
   function handleModalDone(action, jobId) {
-    setOpenEstimates(prev => prev.filter(e => e.job_id !== jobId))
+    setPipelineEstimates(prev => prev.filter(e => e.job_id !== jobId))
     setCloseModal(null)
     if (action === 'awarded') navigate(`/filing-cabinet?job=${jobId}`)
+  }
+
+  async function handleStartWork(jobId) {
+    try {
+      const r = await fetch(`/api/jobs/${jobId}/start-work`, { method: 'POST' })
+      if (!r.ok) throw new Error('Failed to start job')
+      setPipelineEstimates(prev => prev.map(e =>
+        e.job_id === jobId ? { ...e, status: 'in_progress', pipeline_stage: 'in_progress' } : e
+      ))
+    } catch (e) {
+      alert('Error: ' + e.message)
+    }
   }
 
   function updateForm(field, value) {
@@ -379,6 +391,11 @@ export default function Estimate() {
     }
   }
 
+  // Pipeline groups
+  const pendingEstimates    = pipelineEstimates.filter(e => e.status === 'estimate')
+  const acceptedEstimates   = pipelineEstimates.filter(e => e.status === 'pending')
+  const inProgressEstimates = pipelineEstimates.filter(e => e.status === 'in_progress')
+
   // Derived
   const topLevelCats = categories.filter(c => !c.parent_id)
   const subcatMap    = categories.reduce((m, c) => {
@@ -402,40 +419,138 @@ export default function Estimate() {
         />
       )}
 
-      {/* ── Open Estimates list ─────────────────────────────────────────── */}
-      {openEstimates.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 bg-gray-50">
-            <h2 className="text-sm font-semibold text-gray-700">
-              Open Estimates
-              <span className="ml-2 text-xs font-normal text-gray-400">({openEstimates.length})</span>
-            </h2>
-          </div>
-          <div className="divide-y divide-gray-50">
-            {openEstimates.map(est => (
-              <div key={est.job_id} className="flex items-center justify-between px-5 py-3 hover:bg-gray-50">
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-gray-900">{est.customer}</div>
-                  <div className="text-xs text-gray-400 mt-0.5 flex gap-3">
-                    <span>{est.invoice_number}</span>
-                    {est.start_date && <span>{est.start_date}</span>}
-                    {est.estimated_days && <span>{est.estimated_days}d est.</span>}
-                  </div>
-                </div>
-                <div className="flex items-center gap-3 ml-4 flex-shrink-0">
-                  {est.total_amount > 0 && (
-                    <span className="text-sm font-semibold text-gray-700">{fmt(est.total_amount)}</span>
-                  )}
-                  <button
-                    onClick={() => setCloseModal(est)}
-                    className="text-xs px-3 py-1.5 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 font-medium transition-colors"
-                  >
-                    Close Estimate
-                  </button>
-                </div>
+      {/* ── Estimate Pipeline ───────────────────────────────────────────── */}
+      {pipelineEstimates.length > 0 && (
+        <div className="space-y-3">
+
+          {/* Pending customer response */}
+          {pendingEstimates.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 bg-yellow-50 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-yellow-400 shrink-0" />
+                <h2 className="text-sm font-semibold text-yellow-800">
+                  Pending Customer Response
+                  <span className="ml-2 text-xs font-normal text-yellow-600">({pendingEstimates.length})</span>
+                </h2>
               </div>
-            ))}
-          </div>
+              <div className="divide-y divide-gray-50">
+                {pendingEstimates.map(est => (
+                  <div key={est.job_id} className="flex items-center justify-between px-5 py-3 hover:bg-gray-50">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-gray-900">{est.customer}</div>
+                      <div className="text-xs text-gray-400 mt-0.5 flex gap-3">
+                        <span>{est.invoice_number}</span>
+                        {est.start_date && <span>{est.start_date}</span>}
+                        {est.estimated_days && <span>{est.estimated_days}d est.</span>}
+                        {est.customer_phone && <span>{est.customer_phone}</span>}
+                      </div>
+                      {est.notes && <div className="text-xs text-gray-400 mt-0.5 truncate max-w-xs">{est.notes}</div>}
+                    </div>
+                    <div className="flex items-center gap-3 ml-4 shrink-0">
+                      {est.total_amount > 0 && (
+                        <span className="text-sm font-semibold text-gray-700">{fmt(est.total_amount)}</span>
+                      )}
+                      <button
+                        onClick={() => navigate(`/filing-cabinet?job=${est.job_id}`)}
+                        className="text-xs px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 font-medium transition-colors"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => setCloseModal(est)}
+                        className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
+                      >
+                        Award / Trash
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Accepted — customer said yes, work not started */}
+          {acceptedEstimates.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 bg-green-50 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-green-500 shrink-0" />
+                <h2 className="text-sm font-semibold text-green-800">
+                  Accepted
+                  <span className="ml-2 text-xs font-normal text-green-600">({acceptedEstimates.length})</span>
+                </h2>
+              </div>
+              <div className="divide-y divide-gray-50">
+                {acceptedEstimates.map(est => (
+                  <div key={est.job_id} className="flex items-center justify-between px-5 py-3 hover:bg-gray-50">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-gray-900">{est.customer}</div>
+                      <div className="text-xs text-gray-400 mt-0.5 flex gap-3">
+                        <span>{est.invoice_number}</span>
+                        {est.start_date && <span>{est.start_date}</span>}
+                        {est.customer_phone && <span>{est.customer_phone}</span>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 ml-4 shrink-0">
+                      {est.total_amount > 0 && (
+                        <span className="text-sm font-semibold text-gray-700">{fmt(est.total_amount)}</span>
+                      )}
+                      <button
+                        onClick={() => navigate(`/filing-cabinet?job=${est.job_id}`)}
+                        className="text-xs px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg hover:bg-gray-200 font-medium transition-colors"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => handleStartWork(est.job_id)}
+                        className="text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors"
+                      >
+                        Start Work
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* In Progress */}
+          {inProgressEstimates.length > 0 && (
+            <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+              <div className="px-5 py-3 border-b border-gray-100 bg-blue-50 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0 animate-pulse" />
+                <h2 className="text-sm font-semibold text-blue-800">
+                  In Progress
+                  <span className="ml-2 text-xs font-normal text-blue-600">({inProgressEstimates.length})</span>
+                </h2>
+              </div>
+              <div className="divide-y divide-gray-50">
+                {inProgressEstimates.map(est => (
+                  <div key={est.job_id} className="flex items-center justify-between px-5 py-3 hover:bg-gray-50">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-gray-900">{est.customer}</div>
+                      <div className="text-xs text-gray-400 mt-0.5 flex gap-3">
+                        <span>{est.invoice_number}</span>
+                        {est.start_date && <span>{est.start_date}</span>}
+                        {est.customer_phone && <span>{est.customer_phone}</span>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 ml-4 shrink-0">
+                      {est.total_amount > 0 && (
+                        <span className="text-sm font-semibold text-gray-700">{fmt(est.total_amount)}</span>
+                      )}
+                      <button
+                        onClick={() => navigate(`/filing-cabinet?job=${est.job_id}`)}
+                        className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
+                      >
+                        Open in Filing Cabinet
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
         </div>
       )}
 
