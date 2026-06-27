@@ -3668,7 +3668,6 @@ Return ONLY valid JSON."""
 
 
 # ============================================================
-<<<<<<< HEAD
 # LEADS — inbound SMS & call intake
 # ============================================================
 
@@ -4386,7 +4385,9 @@ def mark_jazzy_invoice_paid(invoice_id):
     invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
     conn.close()
     return jsonify(invoice)
-=======
+
+
+# ============================================================
 # SMS LEAD EXTRACTOR
 # Receives forwarded texts from the SMS Forwarder Android app,
 # extracts lead info via Claude, and pushes to ntfy.
@@ -4761,7 +4762,6 @@ def sms_lockbox(phone_number):
     if not row or not row['lockbox_code']:
         return jsonify({'error': 'No lockbox code on file for this number'}), 404
     return jsonify({'phone': phone_number, 'lockbox_code': row['lockbox_code']})
->>>>>>> f5c2573 (Add SMS lead extractor, estimates pipeline, and Claude AI project knowledge)
 
 
 # ============================================================
