@@ -41,10 +41,11 @@ function formatPhone(raw) {
 }
 
 const STATUS_COLORS = {
-  completed: 'bg-green-100 text-green-700',
-  paid:      'bg-green-100 text-green-700',
-  pending:   'bg-yellow-100 text-yellow-700',
-  estimate:  'bg-blue-100 text-blue-700',
+  completed:   'bg-green-100 text-green-700',
+  paid:        'bg-green-100 text-green-700',
+  pending:     'bg-yellow-100 text-yellow-700',
+  estimate:    'bg-blue-100 text-blue-700',
+  in_progress: 'bg-orange-100 text-orange-700',
 }
 function StatusBadge({ status }) {
   return (
@@ -61,7 +62,7 @@ const INPUT_SM = 'w-full border border-gray-200 rounded px-2 py-1.5 text-sm focu
 const TABS = [
   { key: 'all',      label: 'All',       match: null },
   { key: 'estimate', label: 'Estimates', match: ['estimate'] },
-  { key: 'invoice',  label: 'Invoices',  match: ['completed', 'paid', 'pending'] },
+  { key: 'invoice',  label: 'Invoices',  match: ['completed', 'paid', 'pending', 'in_progress'] },
   { key: 'gaps',     label: 'Data Gaps', match: null },
 ]
 
@@ -767,6 +768,7 @@ export default function FilingCabinet() {
                   >
                     <option value="estimate">Estimate</option>
                     <option value="pending">Pending</option>
+                    <option value="in_progress">In Progress</option>
                     <option value="completed">Completed</option>
                     <option value="paid">Paid</option>
                   </select>

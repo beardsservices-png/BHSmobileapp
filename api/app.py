@@ -11,11 +11,12 @@ import re
 import urllib.request
 import urllib.parse
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import math
 import time as _time
 import io
 import base64
+import hashlib
 
 BRIAN_HOME_ADDRESS = os.environ.get('BRIAN_HOME_ADDRESS', '360 County Road 35, Clarkridge, AR 72623')
 BRIAN_HOME_LAT = 36.46519470   # 360 County Rd 35, Clarkridge AR 72623
@@ -175,6 +176,90 @@ def migrate_db():
         ''')
     except Exception:
         pass
+
+    # ── Jazzlyn Pay ────────────────────────────────────────────────────────────
+
+    # Service items catalog — pre-defined tasks with agreed rates
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jazzy_service_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        default_rate REAL NOT NULL,
+        category TEXT DEFAULT 'General',
+        sort_order INTEGER DEFAULT 0,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # Seed default service items (safe to re-run — INSERT OR IGNORE)
+    _seed_items = [
+        ('Facebook Post (Create & Schedule)', 4.00,  'Social Media',    10),
+        ('GMB Business Post',                 4.00,  'Social Media',    20),
+        ('Instagram Post',                    4.00,  'Social Media',    30),
+        ('Lead Follow-Up (Text/Message)',      3.00,  'Lead Management', 10),
+        ('Lead Follow-Up (Phone Call)',        5.00,  'Lead Management', 20),
+        ('Review Response (Google/Facebook)',  2.00,  'Lead Management', 30),
+        ('Estimate Follow-Up',                4.00,  'Lead Management', 40),
+        ('Appointment Scheduled',             8.00,  'Job Conversion',  10),
+        ('Job Closed - Small (under $500)',   15.00,  'Job Conversion',  20),
+        ('Job Closed - Medium ($500-$2000)', 35.00,  'Job Conversion',  30),
+        ('Job Closed - Large ($2000+)',       75.00,  'Job Conversion',  40),
+        ('General Admin Task',                5.00,  'Admin',           10),
+        ('Research & Pricing',                8.00,  'Admin',           20),
+        ('Customer Communication (Email)',    3.00,  'Admin',           30),
+        ('Inbox / Message Monitoring (1 hr)', 8.00,  'Admin',           40),
+    ]
+    for _name, _rate, _cat, _ord in _seed_items:
+        try:
+            cursor.execute(
+                'INSERT OR IGNORE INTO jazzy_service_items (name, default_rate, category, sort_order) VALUES (?, ?, ?, ?)',
+                (_name, _rate, _cat, _ord)
+            )
+        except Exception:
+            pass
+
+    # Jazzlyn's invoices to Brian
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jazzy_invoices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_number TEXT UNIQUE,
+        status TEXT DEFAULT 'draft',
+        total_amount REAL DEFAULT 0,
+        notes TEXT,
+        submitted_at TEXT,
+        paid_at TEXT,
+        paid_notes TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # Line items on each invoice
+    cursor.execute('''CREATE TABLE IF NOT EXISTS jazzy_invoice_lines (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invoice_id INTEGER NOT NULL REFERENCES jazzy_invoices(id),
+        service_item_id INTEGER REFERENCES jazzy_service_items(id),
+        description TEXT NOT NULL,
+        qty INTEGER DEFAULT 1,
+        rate REAL NOT NULL,
+        line_total REAL NOT NULL,
+        assignment_type TEXT DEFAULT 'business',
+        job_ref TEXT,
+        notes TEXT,
+        is_complete INTEGER DEFAULT 1,
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # sms_leads — conversation threads from SMS Forwarder, used by the lead extractor
+    cursor.execute('''CREATE TABLE IF NOT EXISTS sms_leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL UNIQUE,
+        first_contact TEXT,
+        last_message TEXT,
+        thread_json TEXT,
+        last_extraction_json TEXT,
+        lockbox_code TEXT,
+        ntfy_sent_count INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'active',
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
 
     conn.commit()
     conn.close()
@@ -842,6 +927,24 @@ def convert_to_invoice(job_id):
     return jsonify({'message': 'Converted to invoice', 'job_id': job_id})
 
 
+@app.route('/api/jobs/<int:job_id>/start-work', methods=['POST'])
+def start_work(job_id):
+    """Mark an accepted estimate as in progress (pending -> in_progress)."""
+    conn = get_db()
+    cursor = conn.cursor()
+    job = cursor.execute('SELECT id, status FROM jobs WHERE id = ?', (job_id,)).fetchone()
+    if not job:
+        conn.close()
+        return jsonify({'error': 'Job not found'}), 404
+    if job['status'] not in ('pending', 'estimate'):
+        conn.close()
+        return jsonify({'error': 'Job must be pending or estimate to start work'}), 400
+    cursor.execute("UPDATE jobs SET status = 'in_progress' WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Job marked in progress', 'job_id': job_id})
+
+
 @app.route('/api/jobs/<int:job_id>/trash', methods=['POST'])
 def trash_estimate(job_id):
     """Mark an estimate as rejected (trashed) with an optional reason."""
@@ -889,13 +992,15 @@ def delete_job(job_id):
 
 @app.route('/api/estimates')
 def list_estimates():
-    """List all active (non-awarded, non-rejected) estimates."""
+    """List all estimate-pipeline jobs: pending customer response, accepted, or in progress."""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT j.id as job_id,
                COALESCE(i.invoice_number, j.invoice_id) as invoice_number,
                c.name as customer,
+               c.phone as customer_phone,
+               c.address as customer_address,
                j.status,
                j.start_date,
                j.estimated_days,
@@ -906,12 +1011,145 @@ def list_estimates():
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
-        WHERE j.status = 'estimate'
+        WHERE j.status IN ('estimate', 'pending', 'in_progress')
         ORDER BY j.start_date DESC, j.id DESC
     ''')
     estimates = rows_to_list(cursor.fetchall())
     conn.close()
+
+    stage_map = {'estimate': 'pending', 'pending': 'accepted', 'in_progress': 'in_progress'}
+    for e in estimates:
+        e['pipeline_stage'] = stage_map.get(e['status'], e['status'])
+
     return jsonify({'estimates': estimates})
+
+
+@app.route('/api/estimates', methods=['POST'])
+def receive_estimate():
+    """Receive estimate data posted from the external PDF generator script."""
+    data = request.json or {}
+
+    estimate_number  = (data.get('estimate_number') or '').strip()
+    customer_name    = (data.get('customer_name') or '').strip()
+    customer_phone   = (data.get('customer_phone') or '').strip()
+    customer_address = (data.get('customer_address') or '').strip()
+    date             = data.get('date') or datetime.today().strftime('%Y-%m-%d')
+    line_items       = data.get('line_items', [])
+    total            = data.get('total')
+    notes            = (data.get('notes') or '').strip()
+
+    if not re.match(r'^BHS\d{8}$', estimate_number):
+        return jsonify({'error': 'estimate_number must be BHS followed by 8 digits, e.g. BHS20260627'}), 400
+    if not customer_name:
+        return jsonify({'error': 'customer_name is required'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    try:
+        # Dedup: reject if this estimate number already exists
+        existing = cursor.execute(
+            'SELECT id FROM jobs WHERE invoice_id = ?', (estimate_number,)
+        ).fetchone()
+        if existing:
+            conn.close()
+            return jsonify({'error': 'Estimate already exists', 'job_id': existing['id']}), 409
+
+        # Find customer — match by phone digits first, then by name
+        customer_id = None
+        phone_digits = re.sub(r'\D', '', customer_phone)
+
+        if phone_digits:
+            for row in cursor.execute(
+                "SELECT id, phone FROM customers WHERE phone IS NOT NULL AND phone != ''"
+            ).fetchall():
+                if re.sub(r'\D', '', row['phone'] or '') == phone_digits:
+                    customer_id = row['id']
+                    break
+
+        if customer_id is None:
+            row = cursor.execute(
+                'SELECT id FROM customers WHERE name = ?', (customer_name,)
+            ).fetchone()
+            if row:
+                customer_id = row['id']
+
+        if customer_id is None:
+            cursor.execute(
+                'INSERT INTO customers (name, phone, address) VALUES (?, ?, ?)',
+                (customer_name, customer_phone, customer_address)
+            )
+            customer_id = cursor.lastrowid
+        elif customer_address:
+            cursor.execute(
+                "UPDATE customers SET address = ? WHERE id = ? AND (address IS NULL OR address = '')",
+                (customer_address, customer_id)
+            )
+
+        # Classify each line item as labor or materials by service name
+        total_labor = 0.0
+        total_materials = 0.0
+        classified = []
+        for item in line_items:
+            svc_name = (item.get('service') or '').strip()
+            svc_desc = (item.get('desc') or svc_name).strip()
+            price    = float(item.get('price') or 0)
+            svc_type = 'materials' if 'materials' in svc_name.lower() else 'labor'
+            if svc_type == 'labor':
+                total_labor += price
+            else:
+                total_materials += price
+            classified.append((svc_name, svc_desc, svc_type, price))
+
+        total_amount = float(total) if total is not None else (total_labor + total_materials)
+        numeric = estimate_number[3:]
+
+        cursor.execute('''
+            INSERT INTO jobs (customer_id, invoice_id, project_number, start_date, status, notes)
+            VALUES (?, ?, ?, ?, 'estimate', ?)
+        ''', (customer_id, estimate_number, numeric, date, notes))
+        job_id = cursor.lastrowid
+
+        cursor.execute('''
+            INSERT INTO invoices
+            (invoice_number, customer_id, job_id, total_labor, total_materials,
+             total_amount, invoice_date, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'draft')
+        ''', (estimate_number, customer_id, job_id,
+              total_labor, total_materials, total_amount, date))
+        invoice_id = cursor.lastrowid
+
+        for svc_name, svc_desc, svc_type, price in classified:
+            cursor.execute('''
+                INSERT INTO services_performed
+                (invoice_id, job_id, original_description, standardized_description,
+                 category, amount, service_type, quantity, unit_of_measure)
+                VALUES (?, ?, ?, ?, NULL, ?, ?, 1, 'each')
+            ''', (invoice_id, job_id, svc_name, svc_desc, price, svc_type))
+
+        conn.commit()
+        conn.close()
+        return jsonify({
+            'job_id': job_id,
+            'invoice_id': invoice_id,
+            'estimate_number': estimate_number,
+            'customer_id': customer_id,
+        }), 201
+
+    except Exception as e:
+        conn.close()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/estimates/check/<estimate_number>')
+def check_estimate(estimate_number):
+    """Return whether a BHS estimate number already exists. Used by the SMS extractor for dedup."""
+    conn = get_db()
+    row = conn.cursor().execute(
+        'SELECT id FROM jobs WHERE invoice_id = ?', (estimate_number,)
+    ).fetchone()
+    conn.close()
+    return jsonify({'exists': row is not None, 'job_id': row['id'] if row else None})
 
 
 # ============================================================
@@ -3895,6 +4133,635 @@ def delete_lead(lead_id):
     conn.commit()
     conn.close()
     return jsonify({'success': True})
+
+
+# ============================================================
+# JAZZY PAY — Jazzlyn's work invoice system
+# ============================================================
+
+@app.route('/api/jazzy/service-items', methods=['GET'])
+def list_jazzy_service_items():
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT * FROM jazzy_service_items WHERE is_active = 1 ORDER BY category, sort_order, name'
+    ).fetchall()
+    conn.close()
+    return jsonify(rows_to_list(rows))
+
+
+@app.route('/api/jazzy/service-items', methods=['POST'])
+def create_jazzy_service_item():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    rate = data.get('default_rate')
+    if not name or rate is None:
+        return jsonify({'error': 'name and default_rate required'}), 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT INTO jazzy_service_items (name, default_rate, category, sort_order) VALUES (?, ?, ?, ?)',
+        (name, float(rate), data.get('category', 'General'), int(data.get('sort_order', 0)))
+    )
+    item_id = cursor.lastrowid
+    conn.commit()
+    row = conn.execute('SELECT * FROM jazzy_service_items WHERE id = ?', (item_id,)).fetchone()
+    conn.close()
+    return jsonify(row_to_dict(row)), 201
+
+
+@app.route('/api/jazzy/service-items/<int:item_id>', methods=['PUT'])
+def update_jazzy_service_item(item_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    cursor = conn.cursor()
+    item = row_to_dict(cursor.execute('SELECT * FROM jazzy_service_items WHERE id = ?', (item_id,)).fetchone())
+    if not item:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    fields, params = [], []
+    for col in ('name', 'category', 'sort_order', 'is_active'):
+        if col in data:
+            fields.append(f'{col} = ?')
+            params.append(data[col])
+    if 'default_rate' in data:
+        fields.append('default_rate = ?')
+        params.append(float(data['default_rate']))
+    if fields:
+        params.append(item_id)
+        conn.execute(f'UPDATE jazzy_service_items SET {", ".join(fields)} WHERE id = ?', params)
+        conn.commit()
+    row = conn.execute('SELECT * FROM jazzy_service_items WHERE id = ?', (item_id,)).fetchone()
+    conn.close()
+    return jsonify(row_to_dict(row))
+
+
+@app.route('/api/jazzy/service-items/<int:item_id>', methods=['DELETE'])
+def delete_jazzy_service_item(item_id):
+    conn = get_db()
+    conn.execute('UPDATE jazzy_service_items SET is_active = 0 WHERE id = ?', (item_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+def _next_jazzy_invoice_number(cursor):
+    prefix = datetime.now().strftime('JBHS-%Y%m-')
+    existing = cursor.execute(
+        "SELECT invoice_number FROM jazzy_invoices WHERE invoice_number LIKE ? ORDER BY invoice_number DESC LIMIT 1",
+        (prefix + '%',)
+    ).fetchone()
+    if existing:
+        try:
+            last_num = int(existing['invoice_number'].split('-')[-1])
+        except (ValueError, IndexError):
+            last_num = 0
+        return f'{prefix}{last_num + 1:02d}'
+    return f'{prefix}01'
+
+
+def _insert_lines(cursor, invoice_id, lines):
+    total = 0.0
+    for i, line in enumerate(lines):
+        qty = max(1, int(line.get('qty') or 1))
+        rate = float(line.get('rate') or 0)
+        line_total = qty * rate
+        total += line_total
+        cursor.execute(
+            '''INSERT INTO jazzy_invoice_lines
+               (invoice_id, service_item_id, description, qty, rate, line_total,
+                assignment_type, job_ref, notes, is_complete, sort_order)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                invoice_id,
+                int(line['service_item_id']) if line.get('service_item_id') else None,
+                (line.get('description') or '').strip(),
+                qty, rate, line_total,
+                line.get('assignment_type', 'business'),
+                (line.get('job_ref') or '').strip(),
+                (line.get('notes') or '').strip(),
+                1 if line.get('is_complete', True) else 0,
+                i,
+            )
+        )
+    return total
+
+
+@app.route('/api/jazzy/invoices', methods=['GET'])
+def list_jazzy_invoices():
+    conn = get_db()
+    rows = conn.execute('SELECT * FROM jazzy_invoices ORDER BY created_at DESC').fetchall()
+    conn.close()
+    return jsonify(rows_to_list(rows))
+
+
+@app.route('/api/jazzy/invoices', methods=['POST'])
+def create_jazzy_invoice():
+    data = request.get_json() or {}
+    lines = data.get('lines', [])
+    status = data.get('status', 'draft')
+    if status not in ('draft', 'submitted'):
+        status = 'draft'
+
+    conn = get_db()
+    cursor = conn.cursor()
+    invoice_number = _next_jazzy_invoice_number(cursor)
+
+    submitted_at = datetime.now().isoformat() if status == 'submitted' else None
+    cursor.execute(
+        'INSERT INTO jazzy_invoices (invoice_number, status, total_amount, notes, submitted_at) VALUES (?, ?, 0, ?, ?)',
+        (invoice_number, status, (data.get('notes') or '').strip(), submitted_at)
+    )
+    invoice_id = cursor.lastrowid
+    total = _insert_lines(cursor, invoice_id, lines)
+    cursor.execute('UPDATE jazzy_invoices SET total_amount = ? WHERE id = ?', (total, invoice_id))
+
+    conn.commit()
+    invoice = row_to_dict(cursor.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    conn.close()
+    return jsonify(invoice), 201
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>', methods=['GET'])
+def get_jazzy_invoice(invoice_id):
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    invoice['lines'] = rows_to_list(conn.execute(
+        'SELECT * FROM jazzy_invoice_lines WHERE invoice_id = ? ORDER BY sort_order, id',
+        (invoice_id,)
+    ).fetchall())
+    conn.close()
+    return jsonify(invoice)
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>', methods=['PUT'])
+def update_jazzy_invoice(invoice_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    cursor = conn.cursor()
+    invoice = row_to_dict(cursor.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] == 'paid':
+        conn.close()
+        return jsonify({'error': 'Cannot edit a paid invoice'}), 400
+
+    lines = data.get('lines')
+    notes = data.get('notes', invoice.get('notes', ''))
+
+    if lines is not None:
+        cursor.execute('DELETE FROM jazzy_invoice_lines WHERE invoice_id = ?', (invoice_id,))
+        total = _insert_lines(cursor, invoice_id, lines)
+        cursor.execute('UPDATE jazzy_invoices SET total_amount = ?, notes = ? WHERE id = ?', (total, notes, invoice_id))
+    else:
+        cursor.execute('UPDATE jazzy_invoices SET notes = ? WHERE id = ?', (notes, invoice_id))
+
+    conn.commit()
+    invoice = row_to_dict(cursor.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    invoice['lines'] = rows_to_list(cursor.execute(
+        'SELECT * FROM jazzy_invoice_lines WHERE invoice_id = ? ORDER BY sort_order, id',
+        (invoice_id,)
+    ).fetchall())
+    conn.close()
+    return jsonify(invoice)
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>', methods=['DELETE'])
+def delete_jazzy_invoice(invoice_id):
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] == 'paid':
+        conn.close()
+        return jsonify({'error': 'Cannot delete a paid invoice'}), 400
+    conn.execute('DELETE FROM jazzy_invoice_lines WHERE invoice_id = ?', (invoice_id,))
+    conn.execute('DELETE FROM jazzy_invoices WHERE id = ?', (invoice_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>/submit', methods=['POST'])
+def submit_jazzy_invoice(invoice_id):
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] != 'draft':
+        conn.close()
+        return jsonify({'error': 'Only draft invoices can be submitted'}), 400
+    conn.execute(
+        "UPDATE jazzy_invoices SET status = 'submitted', submitted_at = ? WHERE id = ?",
+        (datetime.now().isoformat(), invoice_id)
+    )
+    conn.commit()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    conn.close()
+    return jsonify(invoice)
+
+
+@app.route('/api/jazzy/invoices/<int:invoice_id>/mark-paid', methods=['POST'])
+def mark_jazzy_invoice_paid(invoice_id):
+    data = request.get_json() or {}
+    conn = get_db()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    if not invoice:
+        conn.close()
+        return jsonify({'error': 'Not found'}), 404
+    if invoice['status'] == 'paid':
+        conn.close()
+        return jsonify({'error': 'Already marked paid'}), 400
+    conn.execute(
+        "UPDATE jazzy_invoices SET status = 'paid', paid_at = ?, paid_notes = ? WHERE id = ?",
+        (datetime.now().isoformat(), (data.get('paid_notes') or '').strip(), invoice_id)
+    )
+    conn.commit()
+    invoice = row_to_dict(conn.execute('SELECT * FROM jazzy_invoices WHERE id = ?', (invoice_id,)).fetchone())
+    conn.close()
+    return jsonify(invoice)
+
+
+# ============================================================
+# SMS LEAD EXTRACTOR
+# Receives forwarded texts from the SMS Forwarder Android app,
+# extracts lead info via Claude, and pushes to ntfy.
+# Routes: POST /sms   POST /sms/extract/<phone>   GET /sms/lockbox/<phone>
+# ============================================================
+
+_SMS_SECRET   = os.environ.get('WEBHOOK_SECRET', '')
+_NTFY_URL     = os.environ.get('NTFY_URL', 'https://ntfy.sh')
+_NTFY_TOPIC   = os.environ.get('NTFY_TOPIC', '')
+_NTFY_TOKEN   = os.environ.get('NTFY_TOKEN', '')
+_THREAD_TTL   = int(os.environ.get('THREAD_TTL_HOURS', '4'))
+
+_SMS_SYSTEM_PROMPT = """You are a lead extraction assistant for Beard's Home Services (BHS), a solo handyman and general contracting business owned by Brian Beard in Mountain Home, Arkansas (Baxter County area). Brian does residential and light commercial work — carpentry, decks, fencing, roofing, concrete, remodeling, painting, and general repairs.
+
+Your job is to analyze an SMS conversation thread and extract structured lead information.
+
+LEAD TYPES:
+- new_customer_inquiry: First contact, no prior relationship
+- realtor_referral: Contact from or on behalf of a real estate agent
+- pre_sale_prep: Property being listed, wants work done before sale
+- existing_customer: Returning client who mentions prior work with Brian
+- vendor_or_other: Not a customer lead — vendor, wrong number, spam, personal text, solicitation
+
+INSTRUCTIONS:
+1. Return ONLY valid JSON — no prose, no markdown, no code fences, no preamble
+2. Extract only what is clearly stated in the conversation — do not guess or infer
+3. Use null for any field not explicitly mentioned
+4. If the conversation is not a customer lead, return exactly: {"lead_type": "vendor_or_other"}
+
+For customer leads, return this exact schema:
+{
+  "lead_type": "<type>",
+  "customer_name": "<name or null>",
+  "customer_phone": "<phone or null>",
+  "property_address": "<full address or null>",
+  "is_rental_or_sale": "<rental|sale|owner-occupied|null>",
+  "scope_of_work": "<clear description of work needed or null>",
+  "availability": "<when they can be reached or when they want work done or null>",
+  "realtor_name": "<name or null>",
+  "realtor_phone": "<phone or null>",
+  "realtor_email": "<email or null>",
+  "lockbox_code": "<code or null>",
+  "urgency": "<low|moderate|high|urgent>",
+  "additional_notes": "<any other relevant info or null>",
+  "confidence": "<low|medium|high>"
+}
+
+URGENCY GUIDE:
+- urgent: emergency, active damage, same-day need, "ASAP", "right now", flooding, etc.
+- high: this week, "need it done soon", time-sensitive, before an event or deadline
+- moderate: has a general timeline but flexible, "before winter", "next month", "before listing"
+- low: no timeline stated, "whenever you have time", exploratory inquiry
+
+CONFIDENCE GUIDE:
+- high: clear name, address, and scope of work all present
+- medium: some key fields missing but enough context to follow up
+- low: very vague inquiry, minimal information to work with
+
+Always include realtor fields when lead_type is realtor_referral or pre_sale_prep.
+Always include lockbox_code if a code is mentioned — even if it appears as a short number in context.
+"""
+
+_SMS_MEANINGFUL_FIELDS = {
+    'customer_name', 'property_address', 'scope_of_work',
+    'availability', 'lockbox_code', 'urgency', 'realtor_name', 'realtor_phone',
+}
+
+_BHS_ESTIMATE_RE = re.compile(r'\bBHS\d{8}\b')
+
+
+def _sms_hash(phone):
+    return hashlib.sha256(phone.encode()).hexdigest()[:12]
+
+
+def _sms_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sms_get_thread(phone):
+    conn = get_db()
+    row = conn.execute('SELECT * FROM sms_leads WHERE phone = ?', (phone,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def _sms_upsert_message(phone, message, sent_ts, contact=None):
+    now = _sms_now()
+    new_msg = {'role': 'customer', 'text': message, 'ts': sent_ts or 0}
+    if contact:
+        new_msg['contact'] = contact
+    conn = get_db()
+    row = conn.execute('SELECT thread_json FROM sms_leads WHERE phone = ?', (phone,)).fetchone()
+    if row:
+        thread = json.loads(row['thread_json'] or '[]')
+        thread.append(new_msg)
+        conn.execute(
+            "UPDATE sms_leads SET thread_json = ?, last_message = ?, status = 'active' WHERE phone = ?",
+            (json.dumps(thread), now, phone)
+        )
+    else:
+        thread = [new_msg]
+        conn.execute(
+            "INSERT INTO sms_leads (phone, first_contact, last_message, thread_json, status) VALUES (?, ?, ?, ?, 'active')",
+            (phone, now, now, json.dumps(thread))
+        )
+    conn.commit()
+    conn.close()
+
+
+def _sms_save_extraction(phone, extraction, lockbox_code):
+    conn = get_db()
+    if lockbox_code:
+        conn.execute(
+            'UPDATE sms_leads SET last_extraction_json = ?, lockbox_code = ? WHERE phone = ?',
+            (json.dumps(extraction), lockbox_code, phone)
+        )
+    else:
+        conn.execute(
+            'UPDATE sms_leads SET last_extraction_json = ? WHERE phone = ?',
+            (json.dumps(extraction), phone)
+        )
+    conn.commit()
+    conn.close()
+
+
+def _sms_increment_ntfy(phone):
+    conn = get_db()
+    conn.execute('UPDATE sms_leads SET ntfy_sent_count = ntfy_sent_count + 1 WHERE phone = ?', (phone,))
+    conn.commit()
+    conn.close()
+
+
+def _sms_mark_complete(phone):
+    conn = get_db()
+    conn.execute("UPDATE sms_leads SET status = 'complete' WHERE phone = ?", (phone,))
+    conn.commit()
+    conn.close()
+
+
+def _sms_extract_lead(thread):
+    """Call Claude synchronously to extract lead info from a thread list."""
+    api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if not api_key:
+        raise RuntimeError('ANTHROPIC_API_KEY not set')
+    import anthropic as _ant
+    client = _ant.Anthropic(api_key=api_key)
+    lines = []
+    for msg in thread:
+        contact = f" ({msg['contact']})" if msg.get('contact') else ''
+        lines.append(f"[SMS from {msg['role']}{contact}]: {msg['text']}")
+    thread_text = '\n'.join(lines)
+    resp = client.messages.create(
+        model='claude-sonnet-4-5',
+        max_tokens=1000,
+        temperature=0,
+        system=_SMS_SYSTEM_PROMPT,
+        messages=[{'role': 'user', 'content': f'Extract lead information from this SMS conversation:\n\n{thread_text}'}],
+    )
+    return json.loads(resp.content[0].text.strip())
+
+
+def _sms_has_new_info(previous, current):
+    if previous is None:
+        return any(current.get(f) is not None for f in _SMS_MEANINGFUL_FIELDS)
+    for field in _SMS_MEANINGFUL_FIELDS:
+        prev_val = previous.get(field)
+        curr_val = current.get(field)
+        if prev_val is None and curr_val is not None:
+            return True
+        if prev_val and curr_val and str(prev_val).strip() != str(curr_val).strip():
+            return True
+    return False
+
+
+def _sms_send_ntfy(extraction, is_final=False):
+    """Send an ntfy push notification for a lead extraction result."""
+    if not _NTFY_TOPIC:
+        return
+    lead_type = extraction.get('lead_type', 'new_customer_inquiry')
+    labels = {
+        'new_customer_inquiry': 'New Inquiry',
+        'realtor_referral': 'Realtor Referral',
+        'pre_sale_prep': 'Pre-Sale Prep',
+        'existing_customer': 'Existing Customer',
+    }
+    label = labels.get(lead_type, lead_type.replace('_', ' ').title())
+    customer_name = extraction.get('customer_name') or 'Unknown'
+    prefix = 'Final Lead' if is_final else 'New Lead'
+    title = f'{prefix} — {label} — {customer_name}'
+
+    urgency_map = {'urgent': 'max', 'high': 'high', 'moderate': 'default', 'low': 'low'}
+    priority = urgency_map.get((extraction.get('urgency') or 'moderate').lower(), 'default')
+
+    lines = []
+    if extraction.get('customer_phone'):
+        lines.append(f"Phone: {extraction['customer_phone']}")
+    if extraction.get('property_address'):
+        lines.append(f"Property: {extraction['property_address']}")
+    if extraction.get('is_rental_or_sale'):
+        lines.append(f"Type: {extraction['is_rental_or_sale'].title()}")
+    if extraction.get('scope_of_work'):
+        lines.append(f"Scope: {extraction['scope_of_work']}")
+    if extraction.get('availability'):
+        lines.append(f"Available: {extraction['availability']}")
+    if extraction.get('urgency'):
+        lines.append(f"Urgency: {extraction['urgency'].title()}")
+    if extraction.get('realtor_name'):
+        lines.append(f"Realtor: {extraction['realtor_name']}")
+    if extraction.get('additional_notes'):
+        lines.append(f"Notes: {extraction['additional_notes']}")
+    if extraction.get('lockbox_code'):
+        lines.append('Lockbox: [PRESENT - check app]')
+    if extraction.get('confidence'):
+        lines.append(f"Confidence: {extraction['confidence'].title()}")
+
+    headers = {
+        'Title': title,
+        'Priority': priority,
+        'Tags': f"sms,lead,{lead_type}",
+        'Content-Type': 'text/plain',
+    }
+    if _NTFY_TOKEN:
+        headers['Authorization'] = f'Bearer {_NTFY_TOKEN}'
+
+    import httpx as _httpx
+    _httpx.post(
+        f'{_NTFY_URL.rstrip("/")}/{_NTFY_TOPIC}',
+        content='\n'.join(lines).encode('utf-8'),
+        headers=headers,
+        timeout=10.0,
+    ).raise_for_status()
+
+
+def _sms_check_ttl():
+    """Fire final notifications for threads that have been silent past TTL."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=_THREAD_TTL)).isoformat()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM sms_leads WHERE status = 'active' AND last_message < ?", (cutoff,)
+    ).fetchall()
+    conn.close()
+    for row in rows:
+        phone = row['phone']
+        try:
+            thread = json.loads(row['thread_json'] or '[]')
+            extraction = _sms_extract_lead(thread)
+            if extraction.get('lead_type') != 'vendor_or_other':
+                lockbox = extraction.pop('lockbox_code', None)
+                _sms_save_extraction(phone, extraction, lockbox)
+                _sms_send_ntfy({**extraction, 'lockbox_code': lockbox}, is_final=True)
+                _sms_increment_ntfy(phone)
+            _sms_mark_complete(phone)
+        except Exception as e:
+            app.logger.error(f'[sms-ttl] error for {_sms_hash(phone)}: {e}')
+
+
+def _sms_check_token(token):
+    if _SMS_SECRET and token != _SMS_SECRET:
+        from flask import abort
+        abort(401)
+
+
+@app.route('/sms', methods=['POST'])
+def sms_webhook():
+    """Receive forwarded SMS from SMS Forwarder Android app."""
+    token = request.args.get('token', '')
+    _sms_check_token(token)
+
+    data = request.json or {}
+    phone   = data.get('from', '').strip()
+    message = data.get('message', '').strip()
+    sent_ts = data.get('sentStamp')
+    contact = data.get('contact')
+
+    if not phone or not message:
+        return jsonify({'ok': False, 'error': 'from and message are required'}), 400
+
+    phone_hash = _sms_hash(phone)
+    app.logger.info(f'[sms] received from={phone_hash}')
+
+    _sms_upsert_message(phone, message, sent_ts, contact)
+
+    # Fire TTL completions opportunistically on each incoming message
+    try:
+        _sms_check_ttl()
+    except Exception as e:
+        app.logger.error(f'[sms-ttl] {e}')
+
+    # If the message contains a known BHS estimate number, skip extraction —
+    # that record was already created by the PDF generator POST.
+    for est_num in _BHS_ESTIMATE_RE.findall(message):
+        conn = get_db()
+        exists = conn.execute('SELECT id FROM jobs WHERE invoice_id = ?', (est_num,)).fetchone()
+        conn.close()
+        if exists:
+            app.logger.info(f'[sms] {phone_hash} references existing estimate {est_num}, skipping')
+            return jsonify({'ok': True, 'extracted': False, 'skipped': True, 'reason': 'estimate_exists'})
+
+    thread_record = _sms_get_thread(phone)
+    thread = json.loads(thread_record['thread_json'])
+    prev_raw = thread_record.get('last_extraction_json')
+    prev_extraction = json.loads(prev_raw) if prev_raw else None
+
+    try:
+        extraction = _sms_extract_lead(thread)
+    except Exception as e:
+        app.logger.error(f'[sms-extract] error for {phone_hash}: {e}')
+        return jsonify({'ok': True, 'extracted': False})
+
+    if extraction.get('lead_type') == 'vendor_or_other':
+        app.logger.info(f'[sms] vendor_or_other suppressed for {phone_hash}')
+        return jsonify({'ok': True, 'extracted': False, 'suppressed': True})
+
+    lockbox = extraction.pop('lockbox_code', None)
+    _sms_save_extraction(phone, extraction, lockbox)
+
+    if _sms_has_new_info(prev_extraction, extraction):
+        try:
+            _sms_send_ntfy({**extraction, 'lockbox_code': lockbox})
+            _sms_increment_ntfy(phone)
+            app.logger.info(f'[sms] ntfy sent for {phone_hash}')
+        except Exception as e:
+            app.logger.error(f'[sms-ntfy] error for {phone_hash}: {e}')
+
+    return jsonify({'ok': True, 'extracted': True, 'lead_type': extraction.get('lead_type')})
+
+
+@app.route('/sms/extract/<phone_number>', methods=['POST'])
+def sms_manual_extract(phone_number):
+    """Force immediate extraction and ntfy notification for a thread."""
+    token = request.args.get('token', '')
+    _sms_check_token(token)
+
+    thread_record = _sms_get_thread(phone_number)
+    if not thread_record:
+        return jsonify({'error': 'No thread found for this number'}), 404
+
+    thread = json.loads(thread_record['thread_json'])
+    phone_hash = _sms_hash(phone_number)
+
+    try:
+        extraction = _sms_extract_lead(thread)
+    except Exception as e:
+        return jsonify({'error': f'Extraction failed: {e}'}), 500
+
+    if extraction.get('lead_type') == 'vendor_or_other':
+        return jsonify({'ok': True, 'suppressed': True})
+
+    lockbox = extraction.pop('lockbox_code', None)
+    _sms_save_extraction(phone_number, extraction, lockbox)
+
+    try:
+        _sms_send_ntfy({**extraction, 'lockbox_code': lockbox}, is_final=True)
+        _sms_increment_ntfy(phone_number)
+    except Exception as e:
+        app.logger.error(f'[sms-ntfy] manual error for {phone_hash}: {e}')
+        return jsonify({'error': f'Extraction succeeded but ntfy failed: {e}'}), 500
+
+    app.logger.info(f'[sms] manual extraction sent for {phone_hash}')
+    return jsonify({'ok': True, 'lead_type': extraction.get('lead_type')})
+
+
+@app.route('/sms/lockbox/<phone_number>')
+def sms_lockbox(phone_number):
+    """Retrieve a stored lockbox code for a phone number."""
+    token = request.args.get('token', '')
+    _sms_check_token(token)
+
+    conn = get_db()
+    row = conn.execute('SELECT lockbox_code FROM sms_leads WHERE phone = ?', (phone_number,)).fetchone()
+    conn.close()
+    if not row or not row['lockbox_code']:
+        return jsonify({'error': 'No lockbox code on file for this number'}), 404
+    return jsonify({'phone': phone_number, 'lockbox_code': row['lockbox_code']})
 
 
 # ============================================================
