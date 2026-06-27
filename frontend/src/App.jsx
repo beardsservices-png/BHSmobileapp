@@ -18,8 +18,7 @@ import Leads from './pages/Leads'
 const LS_CLOCK = 'bhs_clock_v1'
 
 // Jazzlyn's Training & Reference hub (the separate JazzyTraining web app).
-// TODO: replace with the live web address once it is known.
-const TRAINING_URL = 'https://jazzytraining.up.railway.app'
+const TRAINING_URL = 'https://jazzytraining-production.up.railway.app'
 
 const ALL_MORE_ITEMS = [
   { key: 'leads',          to: '/leads',           label: 'Leads Inbox' },
